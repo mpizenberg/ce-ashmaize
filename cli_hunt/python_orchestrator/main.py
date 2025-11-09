@@ -435,7 +435,7 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
         tui_app.post_message(ChallengeUpdate(address, c["challengeId"], "available"))
 
 
-def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers):
+def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers, challenge_selection):
     tui_app.post_message(
         LogMessage(
             f"Solver thread started with {max_solvers} workers. Polling every {solve_interval / 60:.1f} minutes."
@@ -483,8 +483,12 @@ def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers):
                             else:
                                 all_available_challenges.append((address, c))
 
-                # Sort challenges by challengeId to prioritize the oldest
-                all_available_challenges.sort(key=lambda x: x[1]["challengeId"])
+                if (challenge_selection == "first"):
+                    # Sort challenges by challengeId to prioritize the oldest
+                    all_available_challenges.sort(key=lambda x: x[1]["challengeId"])
+                elif (challenge_selection == "last"):
+                    # Sort challenges by challengeId to prioritize the youngest
+                    all_available_challenges.sort(key=lambda x: x[1]["challengeId"], reverse=True)
 
                 for address, c in all_available_challenges:
                     if available_slots > 0:
@@ -662,6 +666,7 @@ def run_orchestrator(args):
         "save_interval": args.save_interval,
         "stats_interval": args.stats_interval,
         "max_solvers": args.max_solvers,
+        "challenge_selection": args.challenge_selection
     }
 
     app = OrchestratorTUI(
@@ -690,6 +695,13 @@ def main():
         type=int,
         default=DEFAULT_MAX_SOLVERS,  # A sensible default
         help=f"Maximum number of concurrent solver processes to run (default: {DEFAULT_MAX_SOLVERS}).",
+    )
+    run_parser.add_argument(
+        "--challenge-selection",
+        type=str,
+        choices=["first", "last"],
+        default="first",
+        help="Strategy for selecting the next challenge to solve (default: first, other option: last)"
     )
     run_parser.add_argument(
         "--solve-interval",

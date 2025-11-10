@@ -29,7 +29,7 @@ FETCH_INTERVAL = 10 * 60  # 10 minutes
 DEFAULT_MAX_SOLVERS = 2  # Two solvers in parallel by default
 DEFAULT_SOLVE_INTERVAL = 2 * 60  # 2 minutes
 DEFAULT_SAVE_INTERVAL = 10 * 60  # 10 minutes
-DEFAULT_STATS_INTERVAL = 60 * 60 * 24  # 24 hours
+DEFAULT_STATS_INTERVAL = 10 * 60  # 10 minutes
 
 
 # --- HTTP Session Setup ---
@@ -65,13 +65,17 @@ def fetch_wallet_statistics(address):
         response.raise_for_status()
         data = response.json()
 
+        # Extract crypto_receipts
+        receipts = data.get("local", {}).get("crypto_receipts", 0)
+
         # Extract night_allocation and divide by 1000000
         night_allocation = data.get("local", {}).get("night_allocation", 0)
-        total_mined = night_allocation / 1000000
+        night = night_allocation / 1000000
 
-        return total_mined
+        return (receipts, night)
     except Exception as e:
-        logging.error(f"Error fetching statistics for {address[:10]}...: {e}")
+        short_address = f"{address[:10]}…{address[-6:]}"
+        logging.error(f"Error fetching statistics for {short_address}: {e}")
         return None
 
 
@@ -196,11 +200,12 @@ class DatabaseManager:
         with self._lock:
             return deepcopy(self._db.get(address, {}).get("challenge_queue", []))
 
-    def update_wallet_statistics(self, address, total_mined):
+    def update_wallet_statistics(self, address, receipts, night):
         """Update the total mined amount for a wallet."""
         with self._lock:
             if address in self._db:
-                self._db[address]["total_mined"] = total_mined
+                self._db[address]["receipts"] = receipts
+                self._db[address]["night"] = night
                 self._db[address]["stats_updated_at"] = datetime.now(
                     timezone.utc
                 ).isoformat()
@@ -208,15 +213,19 @@ class DatabaseManager:
     def get_wallet_statistics(self, address):
         """Get the total mined amount for a wallet."""
         with self._lock:
-            return self._db.get(address, {}).get("total_mined", 0)
+            receipts = self._db.get(address, {}).get("receipts", 0)
+            night = self._db.get(address, {}).get("night", 0)
+            return (receipts, night)
 
     def get_all_wallet_statistics(self):
         """Get total mined for all wallets."""
         with self._lock:
-            stats = {}
+            all_receipts = {}
+            all_night = {}
             for address, data in self._db.items():
-                stats[address] = data.get("total_mined", 0)
-            return stats
+                all_receipts[address] = data.get("receipts", 0)
+                all_night[address] = data.get("night", 0)
+            return (all_receipts, all_night)
 
     def save_to_disk(self):
         logging.info("Saving database to disk...")
@@ -268,9 +277,10 @@ def fetcher_worker(db_manager, stop_event, tui_app):
                 added = False
                 for address in addresses:
                     if db_manager.add_challenge(address, deepcopy(new_challenge)):
+                        short_address = f"{address[:10]}…{address[-6:]}"
                         tui_app.post_message(
                             LogMessage(
-                                f"New challenge {new_challenge['challengeId']} added for {address[:10]}..."
+                                f"New challenge {new_challenge['challengeId']} added for {short_address}"
                             )
                         )
                         added = True
@@ -293,7 +303,8 @@ def fetcher_worker(db_manager, stop_event, tui_app):
 def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
     """Solves a single challenge."""
     c = challenge  # for brevity
-    msg = f"Attempting to solve challenge {c['challengeId']} for {address[:10]}..."
+    short_address = f"{address[:10]}…{address[-6:]}"
+    msg = f"Attempting to solve challenge {c['challengeId']} for {short_address}"
     tui_app.post_message(LogMessage(msg))
 
     try:
@@ -490,7 +501,8 @@ def solver_worker(db_manager, stop_event, solve_interval, tui_app, max_solvers, 
                                     address, c["challengeId"], {"status": "expired"}
                                 )
                                 if updated_status:
-                                    msg = f"Challenge {c['challengeId']} for {address[:10]}... has expired."
+                                    short_address = f"{address[:10]}…{address[-6:]}"
+                                    msg = f"Challenge {c['challengeId']} for {short_address} has expired."
                                     tui_app.post_message(LogMessage(msg))
                                     tui_app.post_message(
                                         ChallengeUpdate(
@@ -591,16 +603,17 @@ def stats_worker(db_manager, stop_event, interval, tui_app):
         addresses = db_manager.get_addresses()
         tui_app.post_message(LogMessage("Updating wallet statistics..."))
         for address in addresses:
-            total_mined = fetch_wallet_statistics(address)
-            if total_mined is not None:
-                db_manager.update_wallet_statistics(address, total_mined)
+            (crypto_receipts, night) = fetch_wallet_statistics(address)
+            if crypto_receipts is not None and night is not None:
+                db_manager.update_wallet_statistics(address, crypto_receipts, night)
 
         # Get all stats and calculate total
-        all_stats = db_manager.get_all_wallet_statistics()
-        total = sum(all_stats.values())
+        (all_receipts, all_night) = db_manager.get_all_wallet_statistics()
+        total_receipts = sum(all_receipts.values())
+        total_night = sum(all_night.values())
 
         # Send stats update to TUI
-        tui_app.post_message(StatsUpdate(all_stats, total))
+        tui_app.post_message(StatsUpdate(all_receipts, total_receipts, all_night, total_night))
 
         # Save updated stats to disk
         db_manager.save_to_disk()

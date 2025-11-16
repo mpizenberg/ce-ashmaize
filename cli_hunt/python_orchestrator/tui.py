@@ -153,6 +153,7 @@ class OrchestratorTUI(App):
         self.log_widget.write_line("Starting background worker threads...")
         self.run_fetcher_worker()
         self.run_solver_worker()
+        self.run_submission_worker()
         self.run_saver_worker()
         self.run_stats_worker()
 
@@ -356,6 +357,12 @@ class OrchestratorTUI(App):
             max_solvers,
             challenge_selection,
         )
+
+    @work(name="submission", group="workers", thread=True)
+    def run_submission_worker(self) -> None:
+        """Runs the submission logic in a background thread."""
+        submission_func = self.worker_functions["submission"]
+        submission_func(self.db_manager, self.stop_event, self)
 
     @work(name="saver", group="workers", thread=True)
     def run_saver_worker(self) -> None:

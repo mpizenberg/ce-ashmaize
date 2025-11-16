@@ -369,94 +369,30 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
         )
         tui_app.post_message(LogMessage(f"⏱️ Solved in {solve_duration:.2f} seconds"))
         tui_app.post_message(LogMessage(f"⚡ Hashrate: {hash_rate:.2f} H/s"))
-
-        submit_url = f"https://scavenger.prod.gd.midnighttge.io/solution/{address}/{c['challengeId']}/{nonce}"
-        submit_response = session.post(submit_url)
-        submit_response.raise_for_status()
-        validated_time = datetime.now(timezone.utc)
-        tui_app.post_message(
-            LogMessage(f"✅ Solution submitted successfully for {c['challengeId']}")
+        update = {
+            "status": "submitting",
+            "solvedAt": solved_time.isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            ),
+            "salt": nonce,
+        }
+        updated_status = db_manager.update_challenge(
+            address, c["challengeId"], update
         )
-
-        try:
-            submission_data = submit_response.json()
-            crypto_receipt = submission_data.get("crypto_receipt")
-
-            update = {}
-            if crypto_receipt:
-                update = {
-                    "status": "validated",
-                    "solvedAt": solved_time.isoformat(timespec="milliseconds").replace(
-                        "+00:00", "Z"
-                    ),
-                    "submittedAt": solved_time.isoformat(
-                        timespec="milliseconds"
-                    ).replace("+00:00", "Z"),
-                    "validatedAt": validated_time.isoformat(
-                        timespec="milliseconds"
-                    ).replace("+00:00", "Z"),
-                    "salt": nonce,
-                    "cryptoReceipt": crypto_receipt,
-                }
-                tui_app.post_message(
-                    LogMessage(
-                        f"🎉 Successfully validated challenge {c['challengeId']}"
-                    )
-                )
-            else:
-                update = {
-                    "status": "solved",  # Submitted but not validated with receipt
-                    "solvedAt": solved_time.isoformat(timespec="milliseconds").replace(
-                        "+00:00", "Z"
-                    ),
-                    "salt": nonce,
-                }
-                tui_app.post_message(
-                    LogMessage(
-                        f"Submission for {c['challengeId']} OK but no crypto_receipt."
-                    )
-                )
-
+        if updated_status:
             tui_app.post_message(
-                LogMessage("-----------------------------------------------")
+                ChallengeUpdate(address, c["challengeId"], updated_status)
             )
-            tui_app.post_message(SolutionFound())
-
-            updated_status = db_manager.update_challenge(
-                address, c["challengeId"], update
-            )
-            if updated_status:
-                tui_app.post_message(
-                    ChallengeUpdate(address, c["challengeId"], updated_status)
-                )
-
-        except json.JSONDecodeError:
-            msg = f"Failed to decode submission response for {c['challengeId']}."
-            tui_app.post_message(LogMessage(msg))
-            update = {"status": "submission_error", "salt": nonce}
-            updated_status = db_manager.update_challenge(
-                address, c["challengeId"], update
-            )
-            if updated_status:
-                tui_app.post_message(
-                    ChallengeUpdate(address, c["challengeId"], updated_status)
-                )
-
+        tui_app.post_message(
+            LogMessage("-----------------------------------------------")
+        )
+        tui_app.post_message(SolutionFound())
     except subprocess.CalledProcessError as e:
         msg = f"Rust solver error for {c['challengeId']}: {e.stderr.strip()}"
         tui_app.post_message(LogMessage(msg))
         # Revert status to available if solver fails
         db_manager.update_challenge(address, c["challengeId"], {"status": "available"})
         tui_app.post_message(ChallengeUpdate(address, c["challengeId"], "available"))
-    except requests.exceptions.RequestException as e:  # ty: ignore
-        msg = f"⚠️ Error submitting solution for {c['challengeId']}: {e}"
-        tui_app.post_message(LogMessage(msg))
-        db_manager.update_challenge(
-            address, c["challengeId"], {"status": "submission_error"}
-        )
-        tui_app.post_message(
-            ChallengeUpdate(address, c["challengeId"], "submission_error")
-        )
     except Exception as e:
         msg = f"An unexpected error occurred during solving: {e}"
         tui_app.post_message(LogMessage(msg))
@@ -577,6 +513,141 @@ def solver_worker(
     logging.info("Solver thread stopped.")
 
 
+def _submit_one_challenge(db_manager, tui_app, address, challenge):
+    """Submits a single challenge."""
+    c = challenge  # for brevity
+    short_address = f"{address[:10]}…{address[-6:]}"
+    msg = f"Attempting to submit challenge {c['challengeId']} for {short_address}"
+    tui_app.post_message(LogMessage(msg))
+    update = {}
+    api_okay = True
+    submit_url = f"https://scavenger.prod.gd.midnighttge.io/solution/{address}/{c['challengeId']}/{c['salt']}"
+    try:
+        submit_response = session.post(submit_url)
+        submit_response.raise_for_status()
+        submitted_time = datetime.now(timezone.utc)
+        tui_app.post_message(
+            LogMessage("-----------------------------------------------")
+        )
+        tui_app.post_message(
+            LogMessage(f"✅ Solution submitted successfully for {c['challengeId']}")
+        )
+        submission_data = submit_response.json()
+        crypto_receipt = submission_data.get("crypto_receipt")
+        if crypto_receipt:
+            update = {
+                "status": "validated",
+                "submittedAt": submitted_time.isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z"),
+                "validatedAt": submitted_time.isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z"),
+                "cryptoReceipt": crypto_receipt,
+            }
+            tui_app.post_message(
+                LogMessage(
+                    f"🎉 Successfully validated challenge {c['challengeId']}"
+                )
+            )
+        else:
+            update = {
+                "status": "solved",  # Submitted but not validated with receipt
+                "submittedAt": submitted_time.isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z"),
+            }
+            tui_app.post_message(
+                LogMessage(
+                    f"Submission for {c['challengeId']} OK but no crypto_receipt."
+                )
+            )
+        tui_app.post_message(
+            LogMessage("-----------------------------------------------")
+        )
+        updated_status = db_manager.update_challenge(
+            address, c["challengeId"], update
+        )
+        if updated_status:
+            tui_app.post_message(
+                ChallengeUpdate(address, c["challengeId"], updated_status)
+            )
+    except json.JSONDecodeError:
+        msg = f"Failed to decode submission response for {c['challengeId']}."
+        tui_app.post_message(LogMessage(msg))
+        api_okay = False
+    except requests.exceptions.RequestException as e:  # ty: ignore
+        msg = f"⚠️ Error submitting solution for {c['challengeId']}: {e}"
+        tui_app.post_message(LogMessage(msg))
+        update = {
+            "status": "submitting",
+        }
+        api_okay = False
+        if e.response is not None:
+            status_code = e.response.status_code
+            message = ""
+            json_content = e.response.content.decode()
+            try:
+                content = json.loads(json_content)
+                message = content['message']
+                tui_app.post_message(LogMessage(f"Message: {message}"))
+            except json.JSONDEcodeError:
+                pass
+            if (status_code == 400 and
+                    message == "Solution validation failed: Solution already exists"):
+                update = {
+                    "status": "solved",  # Submitted but not validated with receipt
+                }
+                tui_app.post_message(
+                    LogMessage(
+                        f"Submission for {c['challengeId']} OK but already exists."
+                    )
+                )
+                api_okay = True
+            elif status_code == 429:
+                api_okay = False
+            elif 400 <= status_code < 500:
+                update = {
+                    "status": "submission_error",
+                }
+                api_okay = True
+        updated_status = db_manager.update_challenge(
+            address, c["challengeId"], update
+        )
+        if updated_status:
+            tui_app.post_message(
+                ChallengeUpdate(address, c["challengeId"], updated_status)
+            )
+    return api_okay
+
+
+def submission_worker(db_manager, stop_event, tui_app):
+    tui_app.post_message(
+        LogMessage(
+            "Submission thread started."
+        )
+    )
+    backoff = 1
+    while not stop_event.is_set():
+        addresses = db_manager.get_addresses()
+        for address in addresses:
+            challenges = db_manager.get_challenge_queue(address)
+            for c in challenges:
+                if c["status"] == "submitting":
+                    if _submit_one_challenge(db_manager, tui_app, address, c):
+                        backoff = 1
+                    else:
+                        tui_app.post_message(
+                            LogMessage(
+                                f"Error during submission. Waiting {backoff} seconds before next try."
+                            )
+                        )
+                        stop_event.wait(backoff)
+                        if backoff < 512:
+                            backoff *= 2
+    logging.info("Submission thread stopped.")
+
+
 def saver_worker(db_manager, stop_event, interval, tui_app):
     tui_app.post_message(
         LogMessage(
@@ -694,6 +765,7 @@ def run_orchestrator(args):
     worker_functions = {
         "fetcher": fetcher_worker,
         "solver": solver_worker,
+        "submission": submission_worker,
         "saver": saver_worker,
         "stats": stats_worker,
     }

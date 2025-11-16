@@ -9,6 +9,7 @@ repository = "https://github.com/input-output-hk/ce-ashmaize"
 blake2 = "0.10"
 blake2b_simd = "1.0.3"
 cryptoxide = "~0.5.1"
+metal = "0.28"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

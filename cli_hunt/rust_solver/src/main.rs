@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-const NUM_THREADS: u64 = 2;
+const NUM_THREADS: u64 = 5;
 pub const MB: usize = 1024 * 1024;
 pub const GB: usize = 1024 * MB;
 

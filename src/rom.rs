@@ -16,7 +16,7 @@ pub struct RomDigest(pub(crate) [u8; 64]);
 /// [`hash`]: crate::hash
 pub struct Rom {
     pub digest: RomDigest,
-    data: Vec<u8>,
+    pub data: Vec<u8>,
 }
 
 /// The generation type of the **ROM**.

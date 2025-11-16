@@ -42,26 +42,26 @@ pub use crate::rom::{Rom, RomGenerationType};
 // 1 byte operator
 // 3 bytes operands (src1, src2, dst)
 // 28 bytes data
-const INSTR_SIZE: usize = 20;
-const NB_REGS: usize = 1 << REGS_BITS;
+pub const INSTR_SIZE: usize = 20;
+pub const NB_REGS: usize = 1 << REGS_BITS;
 const REGS_BITS: usize = 5;
 const REGS_INDEX_MASK: u8 = NB_REGS as u8 - 1;
 
 type Register = u64;
 
-const REGISTER_SIZE: usize = std::mem::size_of::<Register>();
+pub const REGISTER_SIZE: usize = std::mem::size_of::<Register>();
 
 /// The `Ashmaize`'s virtual machine
 #[derive(Clone)]
 pub struct VM {
     pub program: Program,
-    regs: [Register; NB_REGS],
-    ip: u32,
-    prog_digest: Blake2b512,
-    mem_digest: Blake2b512,
+    pub regs: [Register; NB_REGS],
+    pub ip: u32,
+    pub prog_digest: Blake2b512,
+    pub mem_digest: Blake2b512,
     pub prog_seed: [u8; 64],
-    memory_counter: u32,
-    loop_counter: u32,
+    pub memory_counter: u32,
+    pub loop_counter: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -184,7 +184,7 @@ impl VM {
         self.ip = self.ip.wrapping_add(1);
     }
 
-    fn sum_regs(&self) -> u64 {
+    pub fn sum_regs(&self) -> u64 {
         self.regs.iter().fold(0, |acc, r| acc.wrapping_add(*r))
     }
 
@@ -276,6 +276,10 @@ impl Program {
 
     pub fn shuffle(&mut self, seed: &[u8; 64]) {
         argon2::hprime(&mut self.instructions, seed)
+    }
+
+    pub fn get_instructions(&self) -> &[u8] {
+        &self.instructions
     }
 }
 
@@ -539,7 +543,7 @@ mod tests {
     }
 }
 
-mod argon2 {
+pub mod argon2 {
     use blake2::{
         Blake2b512, Blake2bVar, Digest,
         digest::{Update, VariableOutput},

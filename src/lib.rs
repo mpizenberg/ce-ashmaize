@@ -39,4 +39,6 @@ pub use crate::rom::{Rom, RomGenerationType};
 pub mod original; // original implementation
 
 pub mod b2; // using the blake2 crate
-pub mod simd; // using the blake2b_simd crate
+#[cfg(target_os = "macos")]
+pub mod metal;
+pub mod simd; // using the blake2b_simd crate // GPU-accelerated implementation using Metal

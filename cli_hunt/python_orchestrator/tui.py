@@ -161,9 +161,10 @@ class OrchestratorTUI(App):
         """Return a user-friendly (emoji) string for a status."""
         status_map = {
             "available": "⏳ Avail",
-            "solving": "⚙️ Solving",
+            "solving": "⚙️ Solve",
+            "submitting": "🚀 Submit",
             "solved": "✅ Solved",
-            "validated": "🏆 Validated",
+            "validated": "🏆 Valid",
             "expired": "❌ Expired",
             "submission_error": "❗️ Error",
         }

@@ -591,7 +591,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
                 content = json.loads(json_content)
                 message = content['message']
                 tui_app.post_message(LogMessage(f"Message: {message}"))
-            except json.JSONDEcodeError:
+            except json.JSONDecodeError:
                 pass
             if (status_code == 400 and
                     message == "Solution validation failed: Solution already exists"):
@@ -629,6 +629,7 @@ def submission_worker(db_manager, stop_event, tui_app):
     )
     backoff = 1
     while not stop_event.is_set():
+        challenges_left = False
         addresses = db_manager.get_addresses()
         for address in addresses:
             challenges = db_manager.get_challenge_queue(address)
@@ -642,9 +643,16 @@ def submission_worker(db_manager, stop_event, tui_app):
                                 f"Error during submission. Waiting {backoff} seconds before next try."
                             )
                         )
+                        challenges_left = True
                         stop_event.wait(backoff)
+                        if stop_event.is_set():
+                            break
                         if backoff < 512:
                             backoff *= 2
+            if stop_event.is_set():
+                break
+        if not challenges_left:
+            stop_event.wait(10)
     logging.info("Submission thread stopped.")
 
 

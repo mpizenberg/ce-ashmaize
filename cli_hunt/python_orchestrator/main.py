@@ -376,9 +376,7 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
             ),
             "salt": nonce,
         }
-        updated_status = db_manager.update_challenge(
-            address, c["challengeId"], update
-        )
+        updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
                 ChallengeUpdate(address, c["challengeId"], updated_status)
@@ -434,7 +432,7 @@ def solver_worker(
                             latest_submission = datetime.fromisoformat(
                                 c["latestSubmission"].replace("Z", "+00:00")
                             )
-                            if now > latest_submission - timedelta(hours=1):
+                            if now > latest_submission - timedelta(hours=2):
                                 # Expire challenge
                                 updated_status = db_manager.update_challenge(
                                     address, c["challengeId"], {"status": "expired"}
@@ -546,9 +544,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
                 "cryptoReceipt": crypto_receipt,
             }
             tui_app.post_message(
-                LogMessage(
-                    f"🎉 Successfully validated challenge {c['challengeId']}"
-                )
+                LogMessage(f"🎉 Successfully validated challenge {c['challengeId']}")
             )
         else:
             update = {
@@ -565,9 +561,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
         tui_app.post_message(
             LogMessage("-----------------------------------------------")
         )
-        updated_status = db_manager.update_challenge(
-            address, c["challengeId"], update
-        )
+        updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
                 ChallengeUpdate(address, c["challengeId"], updated_status)
@@ -589,12 +583,14 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
             json_content = e.response.content.decode()
             try:
                 content = json.loads(json_content)
-                message = content['message']
+                message = content["message"]
                 tui_app.post_message(LogMessage(f"Message: {message}"))
             except json.JSONDecodeError:
                 pass
-            if (status_code == 400 and
-                    message == "Solution validation failed: Solution already exists"):
+            if (
+                status_code == 400
+                and message == "Solution validation failed: Solution already exists"
+            ):
                 update = {
                     "status": "solved",  # Submitted but not validated with receipt
                 }
@@ -611,9 +607,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
                     "status": "submission_error",
                 }
                 api_okay = True
-        updated_status = db_manager.update_challenge(
-            address, c["challengeId"], update
-        )
+        updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
                 ChallengeUpdate(address, c["challengeId"], updated_status)
@@ -622,11 +616,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
 
 
 def submission_worker(db_manager, stop_event, tui_app):
-    tui_app.post_message(
-        LogMessage(
-            "Submission thread started."
-        )
-    )
+    tui_app.post_message(LogMessage("Submission thread started."))
     backoff = 1
     while not stop_event.is_set():
         challenges_left = False

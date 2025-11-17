@@ -641,35 +641,26 @@ impl MetalAshmaize {
     /// Tests the `post_instructions` logic on the GPU
     pub fn test_post_instructions_kernel(
         &self,
-        vm: &VM,
+        rom_digest: &[u8; 64],
+        salt: &[u8],
     ) -> Result<([u64; crate::b2::NB_REGS], [u8; 64], u32), Box<dyn std::error::Error>> {
         // Input buffers
-        let initial_regs_buffer = self.device.new_buffer_with_data(
-            vm.regs.as_ptr() as *const c_void,
-            (crate::b2::NB_REGS * std::mem::size_of::<u64>()) as u64,
+        let rom_digest_buffer = self.device.new_buffer_with_data(
+            rom_digest.as_ptr() as *const c_void,
+            rom_digest.len() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
-        let initial_prog_seed_buffer = self.device.new_buffer_with_data(
-            vm.prog_seed.as_ptr() as *const c_void,
-            64 as u64,
+        let salt_buffer = self.device.new_buffer_with_data(
+            salt.as_ptr() as *const c_void,
+            salt.len() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
-        let initial_loop_counter_buffer = self.device.new_buffer_with_data(
-            &vm.loop_counter as *const u32 as *const c_void,
-            std::mem::size_of_val(&vm.loop_counter) as u64,
+        let salt_len_data = salt.len() as u32;
+        let salt_len_buffer = self.device.new_buffer_with_data(
+            &salt_len_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&salt_len_data) as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
-        let initial_memory_counter_buffer = self.device.new_buffer_with_data(
-            &vm.memory_counter as *const u32 as *const c_void,
-            std::mem::size_of_val(&vm.memory_counter) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
-        );
-        let initial_ip_buffer = self.device.new_buffer_with_data(
-            &vm.ip as *const u32 as *const c_void,
-            std::mem::size_of_val(&vm.ip) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
-        );
-        // TODO: provide prog_digest and mem_digest
 
         // Output buffers
         let output_regs_buffer = self.device.new_buffer(
@@ -687,16 +678,14 @@ impl MetalAshmaize {
         let command_buffer = self.command_queue.new_command_buffer();
         let compute_encoder = command_buffer.new_compute_command_encoder();
 
-        compute_encoder.set_buffer(0, Some(&initial_regs_buffer), 0);
-        compute_encoder.set_buffer(1, Some(&initial_prog_seed_buffer), 0);
-        compute_encoder.set_buffer(2, Some(&initial_loop_counter_buffer), 0);
-        compute_encoder.set_buffer(3, Some(&initial_memory_counter_buffer), 0);
-        compute_encoder.set_buffer(4, Some(&initial_ip_buffer), 0);
-        // TODO: compute_encoder.set_buffer(5, Some(&...), 0);
-        // TODO: compute_encoder.set_buffer(6, Some(&...), 0);
-        compute_encoder.set_buffer(7, Some(&output_regs_buffer), 0);
-        compute_encoder.set_buffer(8, Some(&output_prog_seed_buffer), 0);
-        compute_encoder.set_buffer(9, Some(&output_loop_counter_buffer), 0);
+        // inputs
+        compute_encoder.set_buffer(0, Some(&rom_digest_buffer), 0);
+        compute_encoder.set_buffer(1, Some(&salt_buffer), 0);
+        compute_encoder.set_buffer(2, Some(&salt_len_buffer), 0);
+        // outputs
+        compute_encoder.set_buffer(3, Some(&output_regs_buffer), 0);
+        compute_encoder.set_buffer(4, Some(&output_prog_seed_buffer), 0);
+        compute_encoder.set_buffer(5, Some(&output_loop_counter_buffer), 0);
 
         compute_encoder.set_compute_pipeline_state(&self.post_instructions_pipeline_state);
 
@@ -920,38 +909,6 @@ mod tests {
     }
 
     #[test]
-    fn test_metal_post_instructions_vs_cpu() {
-        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
-
-        let rom = Rom::new(
-            b"test_seed_for_post_instr",
-            RomGenerationType::TwoStep {
-                pre_size: 1024,
-                mixing_numbers: 4,
-            },
-            10_240,
-        );
-        let nb_instrs = 256;
-        let salt = b"post_instructions_salt";
-
-        // Create a CPU VM and execute some instructions to get a non-trivial state
-        let mut cpu_vm = VM::new(&rom.digest, nb_instrs, salt);
-
-        // Run GPU kernel with CPU-derived intermediate values
-        let (gpu_regs, gpu_prog_seed, gpu_loop_counter) = metal_ashmaize
-            .test_post_instructions_kernel(&cpu_vm)
-            .expect("GPU post_instructions kernel failed");
-
-        // Apply post_instructions on this CPU VM
-        cpu_vm.post_instructions();
-
-        // Compare results
-        assert_eq!(cpu_vm.regs, gpu_regs);
-        assert_eq!(cpu_vm.prog_seed, gpu_prog_seed);
-        assert_eq!(cpu_vm.loop_counter, gpu_loop_counter);
-    }
-
-    #[test]
     fn test_metal_vm_init_vs_cpu() {
         let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
 
@@ -978,5 +935,35 @@ mod tests {
         assert_eq!(cpu_vm.memory_counter, gpu_memory_counter);
         assert_eq!(cpu_vm.regs, gpu_regs);
         assert_eq!(cpu_vm.prog_seed, gpu_prog_seed);
+    }
+
+    #[test]
+    fn test_metal_post_instructions_vs_cpu() {
+        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+
+        let rom = Rom::new(
+            b"test_seed_for_post_instr",
+            RomGenerationType::TwoStep {
+                pre_size: 1024,
+                mixing_numbers: 4,
+            },
+            10_240,
+        );
+        let nb_instrs = 256;
+        let salt = b"post_instructions_salt";
+
+        // Create a CPU VM and post_instructions
+        let mut cpu_vm = VM::new(&rom.digest, nb_instrs, salt);
+        cpu_vm.post_instructions();
+
+        // Run GPU kernel with CPU-derived intermediate values
+        let (gpu_regs, gpu_prog_seed, gpu_loop_counter) = metal_ashmaize
+            .test_post_instructions_kernel(&rom.digest.0, salt)
+            .expect("GPU post_instructions kernel failed");
+
+        // Compare results
+        assert_eq!(cpu_vm.regs, gpu_regs);
+        assert_eq!(cpu_vm.prog_seed, gpu_prog_seed);
+        assert_eq!(cpu_vm.loop_counter, gpu_loop_counter);
     }
 }

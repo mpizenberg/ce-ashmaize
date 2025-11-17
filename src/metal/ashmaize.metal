@@ -626,7 +626,7 @@ void post_instructions(thread VMState &vm) {
     }
 
     // Create mixing value
-    uint8_t mixing_input[136]; // 64 + 64 + 8
+    uint8_t mixing_input[132]; // 64 + 64 + 4
     for (int i = 0; i < 64; ++i) {
         mixing_input[i] = prog_value[i];
     }
@@ -875,35 +875,25 @@ kernel void test_vm_init(
 
 
 kernel void test_post_instructions(
-    device const Register *initial_regs [[buffer(0)]],
-    device const uint8_t *initial_prog_seed [[buffer(1)]],
-    constant uint32_t &initial_loop_counter [[buffer(2)]],
-    constant uint32_t &initial_memory_counter [[buffer(3)]],
-    constant uint32_t &initial_ip [[buffer(4)]],
-    // TODO inital state for digests? (buffer 5 and 6)
+    device const uint8_t *rom_digest_array [[buffer(0)]],
+    device const uint8_t *salt_array [[buffer(1)]],
+    constant uint32_t &salt_len [[buffer(2)]],
 
     // outputs
-    device Register *output_regs [[buffer(7)]],
-    device uint8_t *output_prog_seed [[buffer(8)]],
-    device uint32_t *output_loop_counter [[buffer(9)]],
+    device Register *output_regs [[buffer(3)]],
+    device uint8_t *output_prog_seed [[buffer(4)]],
+    device uint32_t *output_loop_counter [[buffer(5)]],
     uint id [[thread_position_in_grid]]
 ) {
     if (id == 0) {
+        // Initialize the VM
+        uint32_t rom_digest_len = 64;
+        thread uint8_t local_rom_digest[64];
+        for (uint i = 0; i < rom_digest_len; ++i) {
+            local_rom_digest[i] = rom_digest_array[i];
+        }
         VMState vm;
-
-        // Initialize VMState components from input buffers
-        for (uint i = 0; i < NB_REGS; ++i) {
-            vm.regs[i] = initial_regs[i];
-        }
-        for (uint i = 0; i < 64; ++i) {
-            vm.prog_seed[i] = initial_prog_seed[i];
-        }
-        vm.loop_counter = initial_loop_counter;
-        vm.ip = initial_ip;
-        vm.memory_counter = initial_memory_counter;
-
-        // How to initialize vm.prog_digest_state?
-        // How to initialize vm.mem_digest_state?
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
 
         // Call the post_instructions kernel
         post_instructions(vm);

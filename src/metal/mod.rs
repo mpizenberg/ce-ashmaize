@@ -15,6 +15,7 @@ pub struct MetalAshmaize {
     hprime_pipeline_state: ComputePipelineState,  // Added for hprime test kernel
     post_instructions_pipeline_state: ComputePipelineState, // Added for post_instructions test kernel
     vm_init_pipeline_state: ComputePipelineState,           // Added for vm_init test kernel
+    execute_one_instruction_pipeline_state: ComputePipelineState, // Added for execute_one_instruction test kernel
 }
 
 impl MetalAshmaize {
@@ -193,6 +194,41 @@ impl MetalAshmaize {
                     return None;
                 }
             };
+
+        // --- NEW CODE FOR EXECUTE_ONE_INSTRUCTION TEST KERNEL ---
+        let execute_one_instruction_kernel_function = match library
+            .get_function("test_execute_one_instruction", None)
+        {
+            Ok(func) => {
+                println!("Successfully retrieved kernel function 'test_execute_one_instruction'");
+                func
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to get function 'test_execute_one_instruction' from library: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        let execute_one_instruction_pipeline_state = match device
+            .new_compute_pipeline_state_with_function(&execute_one_instruction_kernel_function)
+        {
+            Ok(state) => {
+                println!(
+                    "Successfully created compute pipeline state for test_execute_one_instruction"
+                );
+                state
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to create compute pipeline state for test_execute_one_instruction: {}",
+                    e
+                );
+                return None;
+            }
+        };
         // --- END NEW CODE ---
 
         println!("MetalAshmaize initialized successfully");
@@ -204,6 +240,7 @@ impl MetalAshmaize {
             hprime_pipeline_state,
             post_instructions_pipeline_state,
             vm_init_pipeline_state,
+            execute_one_instruction_pipeline_state,
         })
     }
 
@@ -735,6 +772,101 @@ impl MetalAshmaize {
 
         Ok((final_regs, final_prog_seed, final_loop_counter))
     }
+
+    /// Tests the `execute_one_instruction` logic on the GPU using the first instruction after VM initialization
+    pub fn test_execute_one_instruction_kernel(
+        &self,
+        rom: &Rom,
+        rom_digest: &[u8; 64],
+        salt: &[u8],
+        nb_instrs: u32,
+    ) -> Result<[u64; crate::b2::NB_REGS], Box<dyn std::error::Error>> {
+        // Input buffers
+        let rom_buffer = self.device.new_buffer_with_data(
+            rom.data.as_ptr() as *const c_void,
+            rom.data.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let rom_digest_buffer = self.device.new_buffer_with_data(
+            rom_digest.as_ptr() as *const c_void,
+            rom_digest.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let salt_buffer = self.device.new_buffer_with_data(
+            salt.as_ptr() as *const c_void,
+            salt.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let salt_len_data = salt.len() as u32;
+        let salt_len_buffer = self.device.new_buffer_with_data(
+            &salt_len_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&salt_len_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let rom_size_data = rom.data.len() as u32;
+        let rom_size_buffer = self.device.new_buffer_with_data(
+            &rom_size_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&rom_size_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let nb_instrs_data = nb_instrs;
+        let nb_instrs_buffer = self.device.new_buffer_with_data(
+            &nb_instrs_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&nb_instrs_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        // Output buffer for final registers
+        let output_regs_buffer = self.device.new_buffer(
+            (crate::b2::NB_REGS * std::mem::size_of::<u64>()) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let command_buffer = self.command_queue.new_command_buffer();
+        let compute_encoder = command_buffer.new_compute_command_encoder();
+
+        // Set buffers
+        compute_encoder.set_buffer(0, Some(&rom_buffer), 0); // ROM array
+        compute_encoder.set_buffer(1, Some(&rom_digest_buffer), 0); // ROM digest array
+        compute_encoder.set_buffer(2, Some(&salt_buffer), 0); // Salt array
+        compute_encoder.set_buffer(3, Some(&salt_len_buffer), 0); // Salt length
+        compute_encoder.set_buffer(4, Some(&rom_size_buffer), 0); // ROM size
+        compute_encoder.set_buffer(5, Some(&nb_instrs_buffer), 0); // Number of instructions
+        compute_encoder.set_buffer(6, Some(&output_regs_buffer), 0); // Output registers array
+
+        compute_encoder.set_compute_pipeline_state(&self.execute_one_instruction_pipeline_state);
+
+        let threadgroup_size = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+
+        compute_encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        compute_encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let mut final_regs = [0u64; crate::b2::NB_REGS];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                output_regs_buffer.contents() as *const u64,
+                final_regs.as_mut_ptr(),
+                crate::b2::NB_REGS,
+            );
+        }
+
+        Ok(final_regs)
+    }
 }
 
 // Helper function to hash on GPU with fallback to CPU
@@ -965,5 +1097,36 @@ mod tests {
         assert_eq!(cpu_vm.regs, gpu_regs);
         assert_eq!(cpu_vm.prog_seed, gpu_prog_seed);
         assert_eq!(cpu_vm.loop_counter, gpu_loop_counter);
+    }
+
+    #[test]
+    fn test_metal_execute_one_instruction_vs_cpu() {
+        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+
+        // Create a ROM for testing
+        let rom = Rom::new(
+            b"execute_one_test_seed",
+            RomGenerationType::TwoStep {
+                pre_size: 1024,
+                mixing_numbers: 4,
+            },
+            10_240, // 10KB ROM
+        );
+
+        // Create the salt
+        let salt = b"test_salt_execute_one";
+
+        // CPU execution: Create a VM and then execute the first instruction (zeros in the instruction buffer)
+        let nb_instrs = 256;
+        let mut cpu_vm = VM::new(&rom.digest, nb_instrs, salt);
+        crate::b2::execute_one_instruction(&mut cpu_vm, &rom);
+
+        // GPU execution: The VM will be initialized and then execute the first shuffled instruction
+        let gpu_final_regs = metal_ashmaize
+            .test_execute_one_instruction_kernel(&rom, &rom.digest.0, salt, 1)
+            .expect("GPU execute_one_instruction kernel failed");
+
+        // Compare results
+        assert_eq!(cpu_vm.regs, gpu_final_regs);
     }
 }

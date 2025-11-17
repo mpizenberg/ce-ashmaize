@@ -321,7 +321,7 @@ fn decode_instruction(instruction: &[u8; INSTR_SIZE]) -> Instruction {
     }
 }
 
-fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
+pub fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
     let prog_chunk = *vm.program.at(vm.ip);
 
     macro_rules! mem_access64 {

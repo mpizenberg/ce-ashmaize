@@ -908,3 +908,45 @@ kernel void test_post_instructions(
         *output_loop_counter = vm.loop_counter;
     }
 }
+
+
+kernel void test_execute_one_instruction(
+    device const uint8_t *rom_array [[buffer(0)]],
+    device const uint8_t *rom_digest_array [[buffer(1)]],
+    device const uint8_t *salt_array [[buffer(2)]],
+    constant uint32_t &salt_len [[buffer(3)]],
+    constant uint32_t &rom_size [[buffer(4)]],
+    constant uint32_t &nb_instrs [[buffer(5)]],
+
+    // outputs
+    device Register *output_regs [[buffer(6)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id == 0) {
+        // Initialize the VM with given ROM digest and salt
+        uint32_t rom_digest_len = 64;
+        thread uint8_t local_rom_digest[64];
+        for (uint i = 0; i < rom_digest_len; ++i) {
+            local_rom_digest[i] = rom_digest_array[i];
+        }
+        VMState vm;
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+
+        // Create a program and shuffle it like in the main kernel
+        // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes.
+        thread uint8_t local_program_buffer[5120];
+
+        // Initialize program with zeros (as is done in VM::new)
+        for (uint32_t i = 0; i < nb_instrs * INSTR_SIZE; i++) {
+            local_program_buffer[i] = 0;
+        }
+
+        // Now execute the first instruction from the program
+        execute_one_instruction(vm, rom_array, local_program_buffer, rom_size);
+
+        // Copy modified registers back to output buffer
+        for (uint i = 0; i < NB_REGS; ++i) {
+            output_regs[i] = vm.regs[i];
+        }
+    }
+}

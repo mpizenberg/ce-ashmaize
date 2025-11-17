@@ -326,6 +326,7 @@ pub fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
 
     macro_rules! mem_access64 {
         ($vm:ident, $rom:ident, $addr:ident) => {{
+            // mem: &[u8; 64]
             let mem = rom.at($addr as u32);
             $vm.mem_digest.update(mem);
             $vm.memory_counter = $vm.memory_counter.wrapping_add(1);

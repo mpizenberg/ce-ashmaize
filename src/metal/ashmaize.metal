@@ -357,241 +357,347 @@ enum Op2Type {
     RotR = 4
 };
 
-// Get special value 1 (prog digest first 8 bytes)
-uint64_t special1_value64(thread Blake2bState &prog_digest_state) {
-    Blake2bState temp_state = prog_digest_state;
-    uint8_t out[BLAKE2B_OUTBYTES];
-    blake2b_final(temp_state, out, BLAKE2B_OUTBYTES);
-    return ((uint64_t)out[0] << 0) |
-           ((uint64_t)out[1] << 8) |
-           ((uint64_t)out[2] << 16) |
-           ((uint64_t)out[3] << 24) |
-           ((uint64_t)out[4] << 32) |
-           ((uint64_t)out[5] << 40) |
-           ((uint64_t)out[6] << 48) |
-           ((uint64_t)out[7] << 56);
+constant uint32_t DATASET_ACCESS_SIZE = 64;
+inline device const uint8_t* rom_at(device const uint8_t *rom,
+                                    uint32_t rom_size,
+                                    uint32_t i)
+{
+    // avoid division by zero if rom_size < 64: in Rust that would panic on / 0; here we defensively treat blocks=0 -> start=0
+    uint32_t blocks = (rom_size / DATASET_ACCESS_SIZE);
+    uint32_t start = (blocks == 0) ? 0u : (i % blocks);
+
+    // IMPORTANT: replicates the Rust code that uses `start` directly (byte index),
+    // not `start * DATASET_ACCESS_SIZE`. This reproduces the original semantics.
+    uint32_t offset = start;
+
+    // We return rom + offset. The Rust implementation would panic if offset+64 > len,
+    // but Metal cannot panic similarly — caller must ensure rom_size is large enough.
+    return rom + offset;
 }
 
-// Get special value 2 (mem digest first 8 bytes)
-uint64_t special2_value64(thread Blake2bState &mem_digest_state) {
-    Blake2bState temp_state = mem_digest_state;
-    uint8_t out[BLAKE2B_OUTBYTES];
-    blake2b_final(temp_state, out, BLAKE2B_OUTBYTES);
-    return ((uint64_t)out[0] << 0) |
-           ((uint64_t)out[1] << 8) |
-           ((uint64_t)out[2] << 16) |
-           ((uint64_t)out[3] << 24) |
-           ((uint64_t)out[4] << 32) |
-           ((uint64_t)out[5] << 40) |
-           ((uint64_t)out[6] << 48) |
-           ((uint64_t)out[7] << 56);
+inline uint64_t rotate_left_u64(uint64_t v, uint32_t s) {
+    s &= 63;
+    return (v << s) | (v >> ((64 - s) & 63));
+}
+inline uint64_t rotate_right_u64(uint64_t v, uint32_t s) {
+    s &= 63;
+    return (v >> s) | (v << ((64 - s) & 63));
 }
 
-// Memory access function
-uint64_t mem_access64(thread VMState &vm, device const uint8_t *rom, uint64_t addr, uint32_t rom_size) {
-    // Access ROM at specific address
-    uint32_t rom_addr = addr % rom_size;
+// integer isqrt (returns floor(sqrt(x))) - matches typical integer sqrt semantics.
+// Rust used src1.isqrt(); implement deterministic equivalent in Metal.
+inline uint64_t int_isqrt(uint64_t x) {
+    if (x <= 1) return x;
+    // Newton method starting guess
+    uint64_t r = 1ULL << ((63 - clz(x)) / 2 + 1); // rough initial
+    // iterate a few times (should converge quickly)
+    for (int i = 0; i < 6; ++i) {
+        uint64_t nr = (r + x / r) >> 1;
+        if (nr >= r) break;
+        r = nr;
+    }
+    // fix possible overshoot
+    while ((r+1) * (r+1) <= x) ++r;
+    while (r * r > x) --r;
+    return r;
+}
 
-    // Get 64-byte chunk from ROM (as in original implementation)
-    // The Rust `rom.at` method reads a 64-byte block. The Metal version should mimic this.
-    // If rom_addr is near the end, `rom_chunk_start + i` might exceed `rom_size`.
-    // The original Rust `Rom` implementation ensures 64 bytes are always returned,
-    // so we need to be careful with boundary conditions.
-    // Assuming `rom.at` in Rust handles wrapping or padding for 64-byte reads.
-    // For now, let's assume direct copy of 64 bytes is fine.
 
-    // The Rust reference for `rom.at(idx as u32)` takes `u32` for `idx`.
-    // The `rom.data` is an `&[u8]`
-    // `Rom::at` returns `&[u8; 64]`. It likely handles boundaries by mapping
-    // `idx % rom_data.len()` for the start of the 64-byte block.
-    // And then if the block goes past the end, it wraps around.
+inline uint64_t special_value64(thread Blake2bState &digest) {
+    // clone the digest state and finalize it, then return first 8 bytes LE
+    thread Blake2bState S = digest;
+    uint8_t out[64];
+    blake2b_final(S, out, 64);
+    uint64_t v = 0ull;
+    for (int i = 0; i < 8; ++i) {
+        v |= (uint64_t)out[i] << (8 * i);
+    }
+    return v;
+}
+inline uint64_t special1_value64(thread VMState &vm) {
+    return special_value64(vm.prog_digest_state);
+}
+inline uint64_t special2_value64(thread VMState &vm) {
+    return special_value64(vm.mem_digest_state);
+}
 
-    uint32_t chunk_start_idx = (rom_addr / 64) * 64; // Start of the 64-byte block
-    uint8_t mem_chunk[64];
 
-    for (uint32_t i = 0; i < 64; ++i) {
-        mem_chunk[i] = rom[(chunk_start_idx + i) % rom_size];
+// The execute function
+void execute_one_instruction(thread VMState &vm,
+                             device const uint8_t *rom,
+                             thread const uint8_t *prog_chunk,
+                             uint32_t rom_size) {
+
+    // --- decode opcode byte into "opcode value" (0..255) ---
+    uint8_t opcode_byte = prog_chunk[0];
+
+    // Determine if opcode corresponds to Op3 or Op2 and which operator.
+    // The Rust mapping used ranges; we replicate the same boundaries.
+    bool is_op3 = false;
+    Op3Type op3_kind = (Op3Type)0;
+    Op2Type op2_kind = (Op2Type)0;
+    uint8_t hash_index = 0; // only meaningful if opcode selects Hash variant
+
+    // replicate Rust match ranges exactly
+    if (opcode_byte < 40) {
+        is_op3 = true; op3_kind = (Op3Type)Add;
+    } else if (opcode_byte < 80) {
+        is_op3 = true; op3_kind = (Op3Type)Mul;
+    } else if (opcode_byte < 96) {
+        is_op3 = true; op3_kind = (Op3Type)MulH;
+    } else if (opcode_byte < 112) {
+        is_op3 = true; op3_kind = (Op3Type)Div;
+    } else if (opcode_byte < 128) {
+        is_op3 = true; op3_kind = (Op3Type)Mod;
+    } else if (opcode_byte < 138) {
+        is_op3 = false; op2_kind = (Op2Type)ISqrt;
+    } else if (opcode_byte < 148) {
+        is_op3 = false; op2_kind = (Op2Type)BitRev;
+    } else if (opcode_byte < 188) {
+        is_op3 = true; op3_kind = (Op3Type)Xor;
+    } else if (opcode_byte < 204) {
+        is_op3 = false; op2_kind = (Op2Type)RotL;
+    } else if (opcode_byte < 220) {
+        is_op3 = false; op2_kind = (Op2Type)RotR;
+    } else if (opcode_byte < 240) {
+        is_op3 = false; op2_kind = (Op2Type)Neg;
+    } else if (opcode_byte < 248) {
+        is_op3 = true; op3_kind = (Op3Type)And;
+    } else { // 248..=255 => Hash with parameter (value - 248)
+        is_op3 = true;
+        op3_kind = (Op3Type)Hash;
+        hash_index = (uint8_t)(opcode_byte - 248); // 0..7
     }
 
-    blake2b_update(vm.mem_digest_state, mem_chunk, 64);
-    vm.memory_counter++;
+    // --- decode operands nibble ---
+    uint8_t nibble_hi = (prog_chunk[1] >> 4) & 0x0f;
+    uint8_t nibble_lo = (prog_chunk[1] & 0x0f);
 
-    // Divide memory access into 8 chunks of 8 bytes (as per original algorithm)
-    uint32_t idx_in_chunk = ((vm.memory_counter % 8)) * 8;
-    uint64_t result = ((uint64_t)mem_chunk[idx_in_chunk + 0] << 0) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 1] << 8) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 2] << 16) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 3] << 24) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 4] << 32) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 5] << 40) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 6] << 48) |
-                      ((uint64_t)mem_chunk[idx_in_chunk + 7] << 56);
+    // Operand classification exactly as Rust: 0..4 => Reg, 5..8 => Memory, 9..12 => Literal,
+    // 13 => Special1, 14..15 => Special2
+    enum OperandKind { OP_REG, OP_MEM, OP_LIT, OP_SP1, OP_SP2 };
+    auto decode_operand = [&](uint8_t v) -> OperandKind {
+        if (v <= 4) return OP_REG;
+        if (v <= 8) return OP_MEM;
+        if (v <= 12) return OP_LIT;
+        if (v == 13) return OP_SP1;
+        return OP_SP2; // 14 or 15
+    };
 
-    return result;
-}
+    OperandKind op1 = decode_operand(nibble_hi);
+    OperandKind op2 = decode_operand(nibble_lo);
 
-// Decode instruction
-struct Instruction {
-    uint8_t opcode;
-    uint8_t op1, op2;
-    uint8_t r1, r2, r3;
-    uint64_t lit1, lit2;
-};
+    // --- decode r1, r2, r3 from bytes 2..3 (u16 big-endian in rust) ---
+    // rust: let rs = ((instruction[2] as u16) << 8) | (instruction[3] as u16);
+    uint16_t rs = ((uint16_t)prog_chunk[2] << 8) | (uint16_t)prog_chunk[3];
 
-Instruction decode_instruction(thread const uint8_t *instruction) {
-    Instruction instr;
-    instr.opcode = instruction[0];
-    instr.op1 = instruction[1] >> 4;
-    instr.op2 = instruction[1] & 0x0F;
+    // The Rust code references REGS_BITS and REGS_INDEX_MASK (defined elsewhere).
+    // We assume those constants exist in C/Metal translation scope too. If not, replace with actual values.
+    // We'll use the same symbol names here so your build-time constants can supply them.
+    const uint32_t REGS_BITS = REGS_BITS;           // must be provided in compile unit
+    const uint32_t REGS_INDEX_MASK = REGS_INDEX_MASK; // must be provided
 
-    uint16_t rs = ((uint16_t)instruction[2] << 8) | instruction[3];
-    instr.r1 = (rs >> (2 * REGS_BITS)) & REGS_INDEX_MASK;
-    instr.r2 = (rs >> REGS_BITS) & REGS_INDEX_MASK;
-    instr.r3 = rs & REGS_INDEX_MASK;
+    uint8_t r1 = (uint8_t)(((rs >> (2 * REGS_BITS)) & REGS_INDEX_MASK));
+    uint8_t r2 = (uint8_t)(((rs >> REGS_BITS) & REGS_INDEX_MASK));
+    uint8_t r3 = (uint8_t)((rs) & REGS_INDEX_MASK);
 
-    instr.lit1 = ((uint64_t)instruction[4] << 0) |
-                 ((uint64_t)instruction[5] << 8) |
-                 ((uint64_t)instruction[6] << 16) |
-                 ((uint64_t)instruction[7] << 24) |
-                 ((uint64_t)instruction[8] << 32) |
-                 ((uint64_t)instruction[9] << 40) |
-                 ((uint64_t)instruction[10] << 48) |
-                 ((uint64_t)instruction[11] << 56);
-
-    instr.lit2 = ((uint64_t)instruction[12] << 0) |
-                 ((uint64_t)instruction[13] << 8) |
-                 ((uint64_t)instruction[14] << 16) |
-                 ((uint64_t)instruction[15] << 24) |
-                 ((uint64_t)instruction[16] << 32) |
-                 ((uint64_t)instruction[17] << 40) |
-                 ((uint64_t)instruction[18] << 48) |
-                 ((uint64_t)instruction[19] << 56);
-
-    return instr;
-}
-
-// Execute one instruction
-void execute_one_instruction(thread VMState &vm, device const uint8_t *rom,
-                            thread const uint8_t *prog_chunk, uint32_t rom_size) {
-    Instruction instr = decode_instruction(prog_chunk);
-
-    // Get operands
-    uint64_t src1, src2;
-
-    if (instr.op1 < 5) { // Reg
-        src1 = vm.regs[instr.r1];
-    } else if (instr.op1 < 9) { // Memory
-        src1 = mem_access64(vm, rom, instr.lit1, rom_size);
-    } else if (instr.op1 < 13) { // Literal
-        src1 = instr.lit1;
-    } else if (instr.op1 < 14) { // Special1
-        src1 = special1_value64(vm.prog_digest_state);
-    } else { // Special2
-        src1 = special2_value64(vm.mem_digest_state);
+    // --- decode literals lit1 and lit2 (little-endian u64 from prog_chunk[4..12], [12..20]) ---
+    // Rust uses from_le_bytes on slices. We'll reconstruct little-endian.
+    uint64_t lit1 = 0;
+    uint64_t lit2 = 0;
+    // bytes 4..12
+    for (int i = 0; i < 8; ++i) {
+        lit1 |= ((uint64_t)prog_chunk[4 + i]) << (8 * i);
+        lit2 |= ((uint64_t)prog_chunk[12 + i]) << (8 * i);
     }
 
-    if (instr.op2 < 5) { // Reg
-        src2 = vm.regs[instr.r2];
-    } else if (instr.op2 < 9) { // Memory
-        src2 = mem_access64(vm, rom, instr.lit2, rom_size);
-    } else if (instr.op2 < 13) { // Literal
-        src2 = instr.lit2;
-    } else if (instr.op2 < 14) { // Special1
-        src2 = special1_value64(vm.prog_digest_state);
-    } else { // Special2
-        src2 = special2_value64(vm.mem_digest_state);
-    }
-
-    uint64_t result;
-
-    // Determine if it's Op3 or Op2 instruction based on original Rust logic
-    if (instr.opcode < 40) {  // Add
-        result = src1 + src2;
-    } else if (instr.opcode < 80) {  // Mul
-        result = src1 * src2;
-    } else if (instr.opcode < 96) {  // MulH
-        // Using high bits of multiplication matching Rust's (src1 as u128 * src2 as u128) >> 64
-        uint64_t a_lo = src1 & 0xFFFFFFFF;
-        uint64_t a_hi = src1 >> 32;
-        uint64_t b_lo = src2 & 0xFFFFFFFF;
-        uint64_t b_hi = src2 >> 32;
-
-        uint64_t p0 = a_lo * b_lo;
-        uint64_t p1 = a_lo * b_hi;
-        uint64_t p2 = a_hi * b_lo;
-        uint64_t p3 = a_hi * b_hi;
-
-        // The high 64 bits of the 128-bit product
-        uint64_t carry = ((p0 >> 32) + (p1 & 0xFFFFFFFF) + (p2 & 0xFFFFFFFF)) >> 32;
-        result = p3 + (p1 >> 32) + (p2 >> 32) + carry;
-
-    } else if (instr.opcode < 112) {  // Div
-        result = (src2 != 0) ? src1 / src2 : special1_value64(vm.prog_digest_state);
-    } else if (instr.opcode < 128) {  // Mod (bug in Rust implementation: performs division)
-        // NOTE: This intentionally replicates the bug in the Rust reference implementation
-        // where Mod also performs division if src2 is not zero.
-        result = (src2 != 0) ? src1 / src2 : special1_value64(vm.prog_digest_state);
-    } else if (instr.opcode < 138) {  // ISqrt (Op2)
-        // Metal doesn't have an integer square root, using approximation
-        uint64_t x = src1;
-        if (x < 2) {
-            result = x;
-        } else {
-            uint64_t y = (x + 1) / 2;
-            while (y < x) {
-                x = y;
-                y = (x + src1 / x) / 2;
-            }
-            result = x;
+    // Corresponds to Rust macro mem_access64!(vm, rom, addr)
+    auto mem_access64 = [&](thread VMState &vref, device const uint8_t *rom_p, uint64_t addr) -> uint64_t {
+        device const uint8_t *mem = rom_at(rom, rom_size, (uint32_t)addr);
+        uint8_t mem_chunk[64];
+        for (uint32_t i = 0; i < 64; ++i) {
+            mem_chunk[i] = mem[i];
         }
-    } else if (instr.opcode < 148) {  // BitRev (Op2)
-        // Reverse bits of 64-bit value
-        result = 0;
-        uint64_t temp = src1;
-        for (int i = 0; i < 64; i++) {
-            result = (result << 1) | (temp & 1);
-            temp >>= 1;
-        }
-    } else if (instr.opcode < 188) {  // Xor
-        result = src1 ^ src2;
-    } else if (instr.opcode < 204) {  // RotL (Op2)
-        result = (src1 << (instr.r1 & 0x3F)) | (src1 >> (64 - (instr.r1 & 0x3F)));
-    } else if (instr.opcode < 220) {  // RotR (Op2)
-        result = (src1 >> (instr.r1 & 0x3F)) | (src1 << (64 - (instr.r1 & 0x3F)));
-    } else if (instr.opcode < 240) {  // Neg (Op2)
-        result = ~src1;
-    } else if (instr.opcode < 248) {  // And
-        result = src1 & src2;
-    } else {  // Hash (Op3) - 248-255
-        uint8_t input[16];
+        // update mem_digest_state with entire 64-byte chunk
+        blake2b_update(vm.mem_digest_state, mem_chunk, 64);
+        // increment memory_counter (wrapping)
+        vm.memory_counter = vm.memory_counter + 1; // wrapping in metal C++ will behave but make sure vm.memory_counter is uint64
+        // compute index chunk
+        uint32_t idx = (uint32_t)((vm.memory_counter % (64u / 8u)) * 8u);
+        // read little-endian u64 from mem_chunk[idx..idx+8]
+        uint64_t out = 0;
         for (int i = 0; i < 8; ++i) {
-            input[i] = (src1 >> (i * 8)) & 0xFF; // Little-endian
-            input[i + 8] = (src2 >> (i * 8)) & 0xFF; // Little-endian
+            out |= (uint64_t)mem_chunk[idx + i] << (8 * i);
+        }
+        return out;
+    };
+
+    // --- actual operation execution ---
+    if (is_op3) {
+        // fetch src1
+        uint64_t src1;
+        switch (op1) {
+            case OP_REG: src1 = vm.regs[r1]; break;
+            case OP_MEM: src1 = mem_access64(vm, rom, lit1); break;
+            case OP_LIT: src1 = lit1; break;
+            case OP_SP1: src1 = special1_value64(vm); break;
+            default:      src1 = special2_value64(vm); break;
+        }
+        // fetch src2
+        uint64_t src2;
+        switch (op2) {
+            case OP_REG: src2 = vm.regs[r2]; break;
+            case OP_MEM: src2 = mem_access64(vm, rom, lit2); break;
+            case OP_LIT: src2 = lit2; break;
+            case OP_SP1: src2 = special1_value64(vm); break;
+            default:      src2 = special2_value64(vm); break;
         }
 
-        uint8_t out[64];
-        blake2b(out, 64, input, 16);
+        uint64_t result = 0;
+        switch (op3_kind) {
+            case Add: {
+                // wrapping_add in Rust -> identical in uint64 arithmetic
+                result = (uint64_t)(src1 + src2);
+                break;
+            }
+            case Mul: {
+                // wrapping_mul
+                result = (uint64_t)(src1 * src2);
+                break;
+            }
+            case MulH: {
+                // high 64 bits of 128-bit product: ((src1 as u128 * src2 as u128) >> 64) as u64
+                // compute via 128-bit emulation if platform supports, else split
+                // Metal C++ may not have builtin u128, implement via split multiplication.
+                // We'll implement classic 64x64 -> 128 multiplication and extract high 64 bits.
+                uint64_t a_lo = (uint32_t)src1;
+                uint64_t a_hi = src1 >> 32;
+                uint64_t b_lo = (uint32_t)src2;
+                uint64_t b_hi = src2 >> 32;
 
-        uint8_t hash_idx = instr.opcode - 248;
-        if (hash_idx < 8) {
-            result = ((uint64_t)out[hash_idx * 8 + 0] << 0) |
-                     ((uint64_t)out[hash_idx * 8 + 1] << 8) |
-                     ((uint64_t)out[hash_idx * 8 + 2] << 16) |
-                     ((uint64_t)out[hash_idx * 8 + 3] << 24) |
-                     ((uint64_t)out[hash_idx * 8 + 4] << 32) |
-                     ((uint64_t)out[hash_idx * 8 + 5] << 40) |
-                     ((uint64_t)out[hash_idx * 8 + 6] << 48) |
-                     ((uint64_t)out[hash_idx * 8 + 7] << 56);
-        } else {
-            result = src1; // fallback
+                uint64_t p0 = a_lo * b_lo;
+                uint64_t p1 = a_lo * b_hi;
+                uint64_t p2 = a_hi * b_lo;
+                uint64_t p3 = a_hi * b_hi;
+
+                // combine cross terms
+                uint64_t carry = ((p0 >> 32) + (uint32_t)p1 + (uint32_t)p2) >> 32;
+                uint64_t mid = (p1 >> 32) + (p2 >> 32) + carry;
+
+                uint64_t high = p3 + mid;
+                result = high;
+                break;
+            }
+            case Xor: {
+                result = src1 ^ src2;
+                break;
+            }
+            case Div: {
+                if (src2 == 0) {
+                    result = special1_value64(vm);
+                } else {
+                    result = src1 / src2;
+                }
+                break;
+            }
+            case Mod: {
+                // Note: The provided Rust reference has a bug: Mod returns src1 / src2 (same as Div).
+                // We reproduce that bug exactly here.
+                if (src2 == 0) {
+                    result = special1_value64(vm);
+                } else {
+                    // reproduce the reference bug: division instead of modulus
+                    result = src1 / src2;
+                }
+                break;
+            }
+            case And: {
+                result = src1 & src2;
+                break;
+            }
+            case Hash: {
+                uint8_t input16[16];
+                // write little-endian
+                for (int i = 0; i < 8; ++i) input16[i] = (uint8_t)((src1 >> (8 * i)) & 0xFFu);
+                for (int i = 0; i < 8; ++i) input16[8 + i] = (uint8_t)((src2 >> (8 * i)) & 0xFFu);
+
+                uint8_t digest64[64];
+                blake2b(digest64, 64, input16, 16);
+
+                // take chunk hash_index (0..7) of 8 bytes and interpret as little-endian u64
+                thread uint8_t *chunk = &(digest64[hash_index * 8]);
+                uint64_t chunk_u64 = 0;
+                for (int i = 0; i < 8; ++i) chunk_u64 |= (uint64_t)chunk[i] << (8 * i);
+                result = chunk_u64;
+                break;
+            }
+            default: {
+                // Unknown Op3 kind; keep result 0 (shouldn't happen if mapping is correct).
+                result = 0;
+                break;
+            }
+        } // end switch op3_kind
+
+        // write to destination register r3
+        vm.regs[r3] = result;
+
+    } else { // Op2 operator
+        // fetch src1 according to op1
+        uint64_t src1;
+        switch (op1) {
+            case OP_REG: src1 = vm.regs[r1]; break;
+            case OP_MEM: src1 = mem_access64(vm, rom, lit1); break;
+            case OP_LIT: src1 = lit1; break;
+            case OP_SP1: src1 = special1_value64(vm); break;
+            default:      src1 = special2_value64(vm); break;
         }
-    }
 
-    vm.regs[instr.r3] = result;
+        uint64_t result = 0;
+        switch (op2_kind) {
+            case Neg: {
+                result = ~src1;
+                break;
+            }
+            case RotL: {
+                result = rotate_left_u64(src1, (uint32_t)r1);
+                break;
+            }
+            case RotR: {
+                result = rotate_right_u64(src1, (uint32_t)r1);
+                break;
+            }
+            case ISqrt: {
+                result = int_isqrt(src1);
+                break;
+            }
+            case BitRev: {
+                // reverse bits, same as Rust u64.reverse_bits()
+                // Implement via builtin or manual loop
+                uint64_t x = src1;
+                // Use typical bit-reversal algorithm (swap halves progressively)
+                x = ((x & 0x5555555555555555ULL) << 1) | ((x >> 1) & 0x5555555555555555ULL);
+                x = ((x & 0x3333333333333333ULL) << 2) | ((x >> 2) & 0x3333333333333333ULL);
+                x = ((x & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((x >> 4) & 0x0F0F0F0F0F0F0F0FULL);
+                x = ((x & 0x00FF00FF00FF00FFULL) << 8) | ((x >> 8) & 0x00FF00FF00FF00FFULL);
+                x = ((x & 0x0000FFFF0000FFFFULL) << 16) | ((x >> 16) & 0x0000FFFF0000FFFFULL);
+                x = (x << 32) | (x >> 32);
+                result = x;
+                break;
+            }
+            default: {
+                // Should not get here, default safe
+                result = src1;
+                break;
+            }
+        } // end switch op2_kind
 
-    // Update prog_digest with the instruction chunk
+        vm.regs[r3] = result;
+    } // end if is_op3
+
+    // Update program digest with this instruction/chunk
     blake2b_update(vm.prog_digest_state, prog_chunk, INSTR_SIZE);
 }
+
 
 // Post instructions processing
 void post_instructions(thread VMState &vm) {
@@ -682,18 +788,14 @@ void execute_program(thread VMState &vm, device const uint8_t *rom,
     // Shuffle program using the current prog_seed
     program_shuffle(program_buffer, program_size, vm.prog_seed);
 
-    // Reset IP for each new program execution within a loop
-    vm.ip = 0; // The original Rust code resets the IP implicitly by looping from 0 to nb_instrs
-
     // Execute instructions for this specific thread
     for (uint32_t i = 0; i < nb_instrs; i++) {
-        // Calculate instruction offset based on current IP (modulo nb_instrs for safety, though IP resets to 0)
-        uint32_t offset = (vm.ip % nb_instrs) * INSTR_SIZE;
-        execute_one_instruction(vm, rom, &program_buffer[offset], rom_size);
+        execute_one_instruction(vm, rom, &program_buffer[vm.ip], rom_size);
         vm.ip++;
     }
-    // post_instructions is called after execute_program in the Rust hash function, not inside.
-    // It's called in the ashmaize_hash kernel after the execute_program loop.
+
+    // Post instructions
+    post_instructions(vm);
 }
 
 // Finalize VM and get result
@@ -910,7 +1012,7 @@ kernel void test_post_instructions(
 }
 
 
-kernel void test_execute_one_instruction(
+kernel void test_execute_program(
     device const uint8_t *rom_array [[buffer(0)]],
     device const uint8_t *rom_digest_array [[buffer(1)]],
     device const uint8_t *salt_array [[buffer(2)]],
@@ -932,7 +1034,6 @@ kernel void test_execute_one_instruction(
         VMState vm;
         vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
 
-        // Create a program and shuffle it like in the main kernel
         // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes.
         thread uint8_t local_program_buffer[5120];
 
@@ -941,8 +1042,8 @@ kernel void test_execute_one_instruction(
             local_program_buffer[i] = 0;
         }
 
-        // Now execute the first instruction from the program
-        execute_one_instruction(vm, rom_array, local_program_buffer, rom_size);
+        // Now execute the program
+        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120);
 
         // Copy modified registers back to output buffer
         for (uint i = 0; i < NB_REGS; ++i) {

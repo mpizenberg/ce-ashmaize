@@ -15,7 +15,7 @@ pub struct MetalAshmaize {
     hprime_pipeline_state: ComputePipelineState,  // Added for hprime test kernel
     post_instructions_pipeline_state: ComputePipelineState, // Added for post_instructions test kernel
     vm_init_pipeline_state: ComputePipelineState,           // Added for vm_init test kernel
-    execute_one_instruction_pipeline_state: ComputePipelineState, // Added for execute_one_instruction test kernel
+    execute_program_pipeline_state: ComputePipelineState, // Added for execute_one_instruction test kernel
 }
 
 impl MetalAshmaize {
@@ -195,41 +195,38 @@ impl MetalAshmaize {
                 }
             };
 
-        // --- NEW CODE FOR EXECUTE_ONE_INSTRUCTION TEST KERNEL ---
-        let execute_one_instruction_kernel_function = match library
-            .get_function("test_execute_one_instruction", None)
-        {
-            Ok(func) => {
-                println!("Successfully retrieved kernel function 'test_execute_one_instruction'");
-                func
-            }
-            Err(e) => {
-                eprintln!(
-                    "Failed to get function 'test_execute_one_instruction' from library: {}",
-                    e
-                );
-                return None;
-            }
-        };
+        // ---------------------------
+        let execute_program_kernel_function =
+            match library.get_function("test_execute_program", None) {
+                Ok(func) => {
+                    println!("Successfully retrieved kernel function 'test_execute_program'");
+                    func
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to get function 'test_execute_program' from library: {}",
+                        e
+                    );
+                    return None;
+                }
+            };
 
-        let execute_one_instruction_pipeline_state = match device
-            .new_compute_pipeline_state_with_function(&execute_one_instruction_kernel_function)
+        let execute_program_pipeline_state = match device
+            .new_compute_pipeline_state_with_function(&execute_program_kernel_function)
         {
             Ok(state) => {
-                println!(
-                    "Successfully created compute pipeline state for test_execute_one_instruction"
-                );
+                println!("Successfully created compute pipeline state for test_execute_program");
                 state
             }
             Err(e) => {
                 eprintln!(
-                    "Failed to create compute pipeline state for test_execute_one_instruction: {}",
+                    "Failed to create compute pipeline state for test_execute_program: {}",
                     e
                 );
                 return None;
             }
         };
-        // --- END NEW CODE ---
+        // ---------------------------
 
         println!("MetalAshmaize initialized successfully");
         Some(Self {
@@ -240,7 +237,7 @@ impl MetalAshmaize {
             hprime_pipeline_state,
             post_instructions_pipeline_state,
             vm_init_pipeline_state,
-            execute_one_instruction_pipeline_state,
+            execute_program_pipeline_state,
         })
     }
 
@@ -773,8 +770,8 @@ impl MetalAshmaize {
         Ok((final_regs, final_prog_seed, final_loop_counter))
     }
 
-    /// Tests the `execute_one_instruction` logic on the GPU using the first instruction after VM initialization
-    pub fn test_execute_one_instruction_kernel(
+    /// Tests the `execute_program` logic on the GPU
+    pub fn test_execute_program_kernel(
         &self,
         rom: &Rom,
         rom_digest: &[u8; 64],
@@ -837,7 +834,7 @@ impl MetalAshmaize {
         compute_encoder.set_buffer(5, Some(&nb_instrs_buffer), 0); // Number of instructions
         compute_encoder.set_buffer(6, Some(&output_regs_buffer), 0); // Output registers array
 
-        compute_encoder.set_compute_pipeline_state(&self.execute_one_instruction_pipeline_state);
+        compute_encoder.set_compute_pipeline_state(&self.execute_program_pipeline_state);
 
         let threadgroup_size = MTLSize {
             width: 1,
@@ -1100,12 +1097,12 @@ mod tests {
     }
 
     #[test]
-    fn test_metal_execute_one_instruction_vs_cpu() {
+    fn test_metal_execute_program_vs_cpu() {
         let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
 
         // Create a ROM for testing
         let rom = Rom::new(
-            b"execute_one_test_seed",
+            b"execute_test_seed",
             RomGenerationType::TwoStep {
                 pre_size: 1024,
                 mixing_numbers: 4,
@@ -1114,16 +1111,16 @@ mod tests {
         );
 
         // Create the salt
-        let salt = b"test_salt_execute_one";
+        let salt = b"test_salt_execute";
 
-        // CPU execution: Create a VM and then execute the first instruction (zeros in the instruction buffer)
+        // CPU execution
         let nb_instrs = 256;
         let mut cpu_vm = VM::new(&rom.digest, nb_instrs, salt);
-        crate::b2::execute_one_instruction(&mut cpu_vm, &rom);
+        cpu_vm.execute(&rom, nb_instrs);
 
-        // GPU execution: The VM will be initialized and then execute the first shuffled instruction
+        // GPU execution
         let gpu_final_regs = metal_ashmaize
-            .test_execute_one_instruction_kernel(&rom, &rom.digest.0, salt, 1)
+            .test_execute_program_kernel(&rom, &rom.digest.0, salt, nb_instrs)
             .expect("GPU execute_one_instruction kernel failed");
 
         // Compare results

@@ -1110,21 +1110,6 @@ pub struct TestExecOneResult {
     pub final_mem_digest_hash: [u8; 64],
 }
 
-pub fn hash_gpu<R: crate::rom::RomLike>(
-    salt: &[u8],
-    rom: &R,
-    nb_loops: u32,
-    nb_instrs: u32,
-) -> [u8; 64] {
-    let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
-    metal_ashmaize
-        .hash(&[salt], rom, nb_loops, nb_instrs)
-        .expect("GPU hash failed")
-        .into_iter()
-        .next()
-        .expect("GPU hash did not return a result")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,7 +1119,48 @@ mod tests {
     use blake2::{Blake2b512, Digest}; // Import for CPU Blake2b
 
     #[test]
-    fn test_ashmaize_hash_kernel() {
+    fn test_ashmaize_hash_single() {
+        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+
+        // 1. Create a full Rom
+        let rom_key = b"comparison_seed";
+        let full_rom = Rom::new(
+            rom_key,
+            RomGenerationType::TwoStep {
+                pre_size: 1024,
+                mixing_numbers: 4,
+            },
+            10_240,
+        );
+
+        // 2. Create a LightRom from it
+        let light_rom = full_rom.shrink();
+        assert!(light_rom.data().len() < full_rom.data().len());
+
+        let salt_ok: [u8; _] = [0x73, 0x61, 0x6c, 0x74, 0x5f, 0x30];
+        let salt_ko: [u8; _] = [0x73, 0x61, 0x6c, 0x74, 0x5f, 0x30, 0x00];
+        let salt = salt_ok;
+
+        // 3. Calculate the expected hash on the CPU for comparison
+        let expected_hash = crate::b2::hash(&salt, &full_rom, 8, 256);
+
+        // 4. Calculate the hash on the GPU using the LightRom
+        let gpu_result = metal_ashmaize
+            .hash(&[&salt], &light_rom, 8, 256)
+            .expect("GPU hash failed")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // 5. Compare the results
+        assert_eq!(
+            expected_hash, gpu_result,
+            "GPU hash does not match expected hash"
+        );
+    }
+
+    #[test]
+    fn test_ashmaize_hash_multiple() {
         let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
 
         let rom = Rom::new(

@@ -348,14 +348,14 @@ class OrchestratorTUI(App):
         """Runs the solver logic in a background thread."""
         solver_func = self.worker_functions["solver"]
         solve_interval = self.worker_args["solve_interval"]
-        max_solvers = self.worker_args["max_solvers"]
+        cpu_threads = self.worker_args["cpu_threads"]
         challenge_selection = self.worker_args["challenge_selection"]
         solver_func(
             self.db_manager,
             self.stop_event,
             solve_interval,
             self,
-            max_solvers,
+            cpu_threads,
             challenge_selection,
         )
 

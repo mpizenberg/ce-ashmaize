@@ -26,7 +26,6 @@ RUST_SOLVER_PATH = (
     "../rust_solver/target/release/ashmaize-solver"  # Assuming it's built
 )
 FETCH_INTERVAL = 10 * 60  # 10 minutes
-DEFAULT_MAX_SOLVERS = 2  # Two solvers in parallel by default
 DEFAULT_SOLVE_INTERVAL = 2 * 60  # 2 minutes
 DEFAULT_SAVE_INTERVAL = 10 * 60  # 10 minutes
 DEFAULT_STATS_INTERVAL = 60 * 60  # 60 minutes
@@ -301,7 +300,9 @@ def fetcher_worker(db_manager, stop_event, tui_app):
     logging.info("Fetcher thread stopped.")
 
 
-def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
+def _solve_one_challenge(
+    db_manager, tui_app, stop_event, address, challenge, cpu_threads
+):
     """Solves a single challenge."""
     c = challenge  # for brevity
     short_address = f"{address[:10]}…{address[-6:]}"
@@ -324,6 +325,8 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
             "--no-pre-mine-hour",
             str(c["noPreMineHour"]),  # Convert to string for subprocess
         ]
+        if cpu_threads is not None:
+            command += ["cpu-threads", str(cpu_threads)]
         start_time = datetime.now(timezone.utc)
         process = subprocess.Popen(
             command,
@@ -399,16 +402,16 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
 
 
 def solver_worker(
-    db_manager, stop_event, solve_interval, tui_app, max_solvers, challenge_selection
+    db_manager, stop_event, solve_interval, tui_app, cpu_threads, challenge_selection
 ):
     tui_app.post_message(
         LogMessage(
-            f"Solver thread started with {max_solvers} workers. Polling every {solve_interval / 60:.1f} minutes."
+            f"Solver thread started. Polling every {solve_interval / 60:.1f} minutes."
         )
     )
 
     # The executor should live for the duration of the worker
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_solvers) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         # Store futures for active tasks
         active_futures = set()
         while not stop_event.is_set():
@@ -418,7 +421,7 @@ def solver_worker(
             for f in done_futures:
                 active_futures.remove(f)
 
-            available_slots = max_solvers - len(active_futures)
+            available_slots = 1 - len(active_futures)
             challenges_dispatched_this_round = 0
             if available_slots > 0:
                 addresses = db_manager.get_addresses()
@@ -480,6 +483,7 @@ def solver_worker(
                                 stop_event,
                                 address,
                                 deepcopy(c),  # Pass a deepcopy
+                                cpu_threads,
                             )
                             active_futures.add(future)
                             challenges_dispatched_this_round += 1
@@ -496,7 +500,7 @@ def solver_worker(
                     tui_app.post_message(LogMessage("No available challenges found."))
 
             # If all slots are full, wait for one future to complete, or a short timeout
-            if len(active_futures) >= max_solvers and active_futures:
+            if len(active_futures) >= cpu_threads and active_futures:
                 # Wait for at least one task to complete or a short period if none are done quickly
                 concurrent.futures.wait(
                     active_futures,
@@ -772,7 +776,7 @@ def run_orchestrator(args):
         "solve_interval": args.solve_interval,
         "save_interval": args.save_interval,
         "stats_interval": args.stats_interval,
-        "max_solvers": args.max_solvers,
+        "cpu_threads": args.cpu_threads,
         "challenge_selection": args.challenge_selection,
     }
 
@@ -798,17 +802,11 @@ def main():
 
     run_parser = subparsers.add_parser("run", help="Run the orchestrator with TUI.")
     run_parser.add_argument(
-        "--max-solvers",
-        type=int,
-        default=DEFAULT_MAX_SOLVERS,  # A sensible default
-        help=f"Maximum number of concurrent solver processes to run (default: {DEFAULT_MAX_SOLVERS}).",
-    )
-    run_parser.add_argument(
         "--challenge-selection",
         type=str,
         choices=["first", "last"],
-        default="first",
-        help="Strategy for selecting the next challenge to solve (default: first, other option: last)",
+        default="last",
+        help="Strategy for selecting the next challenge to solve (default: last, other option: first)",
     )
     run_parser.add_argument(
         "--solve-interval",
@@ -827,6 +825,11 @@ def main():
         type=int,
         default=DEFAULT_STATS_INTERVAL,
         help=f"Interval in seconds for updating wallet mining statistics (default: {DEFAULT_STATS_INTERVAL}).",
+    )
+    run_parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        help="Maximum number of cpu threads to run (default to 80%).",
     )
 
     args = parser.parse_args()

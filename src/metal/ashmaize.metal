@@ -14,7 +14,10 @@ constant uint REGISTER_SIZE = 8; // Size of Register in bytes
 constant uint DIGEST_INIT_SIZE = 64;
 constant uint REGS_CONTENT_SIZE = 256; // sizeof(Register) * NB_REGS (8 * 32)
 
+// Instrumentation control - set to 0 to completely remove instrumentation overhead
+#define INSTRUMENTATION_ENABLED 0
 
+#if INSTRUMENTATION_ENABLED
 // Instrumentation Metrics
 constant uint METRIC_BLAKE2B_ROUND_COUNT = 0;
 constant uint METRIC_EXECUTE_INSTR_COUNT = 1;
@@ -22,6 +25,12 @@ constant uint METRIC_HPRIME_COUNT = 2;
 constant uint METRIC_ROM_ACCESS_COUNT = 3;
 constant uint METRIC_SPECIAL_VALUE_COUNT = 4;
 constant uint TOTAL_METRICS = 5;
+
+#define INSTRUMENT_INC(buffer, metric) \
+    do { if (buffer) atomic_fetch_add_explicit(buffer + metric, 1u, memory_order_relaxed); } while(0)
+#else
+#define INSTRUMENT_INC(buffer, metric) ((void)0)
+#endif
 
 // Blake2b constants
 constant uint BLAKE2B_BLOCKBYTES = 128;
@@ -70,9 +79,7 @@ void blake2b_G(thread uint64_t &a, thread uint64_t &b, thread uint64_t &c, threa
 
 // Round function for Blake2b
 void blake2b_round(thread Blake2bState &S, thread const uint64_t *m, device atomic_uint *instrumentation_buffer) {
-    if (instrumentation_buffer) {
-        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_BLAKE2B_ROUND_COUNT, 1u, memory_order_relaxed);
-    }
+    INSTRUMENT_INC(instrumentation_buffer, METRIC_BLAKE2B_ROUND_COUNT);
     uint64_t v[16]; // Local 16-word state vector for compression
 
     // Initialize v
@@ -211,9 +218,7 @@ void blake2b(thread uint8_t *out, uint outlen, thread const uint8_t *in, uint in
 
 // Argon2 H' function
 void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input, uint input_len, device atomic_uint *instrumentation_buffer) {
-    if (instrumentation_buffer) {
-        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_HPRIME_COUNT, 1u, memory_order_relaxed);
-    }
+    INSTRUMENT_INC(instrumentation_buffer, METRIC_HPRIME_COUNT);
     if (output_len <= 64) {
         uint8_t temp[BLAKE2B_OUTBYTES + 4 + 512]; // Max 64 (output_len) + 4 (output_len_bytes) + 512 (max input_len)
         temp[0] = output_len & 0xFF;
@@ -296,11 +301,11 @@ struct VMState {
     // Digests as state
     Blake2bState prog_digest_state;
     Blake2bState mem_digest_state;
-    // Caching for special values
+    // Per-instruction caching for special values to avoid duplicate clones/finalizations
     uint64_t cached_special1_value;
-    bool special1_value_is_cached;
+    bool special1_valid;  // invalidated after prog_digest update
     uint64_t cached_special2_value;
-    bool special2_value_is_cached;
+    bool special2_valid;  // invalidated after mem_digest update
 };
 
 // VM initialization function
@@ -353,8 +358,8 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
     vm.ip = 0;
     vm.loop_counter = 0;
     vm.memory_counter = 0;
-    vm.special1_value_is_cached = false;
-    vm.special2_value_is_cached = false;
+    vm.special1_valid = false;
+    vm.special2_valid = false;
 }
 
 
@@ -384,9 +389,7 @@ inline device const uint8_t* rom_at(device const uint8_t *rom,
                                     uint32_t i,
                                     device atomic_uint *instrumentation_buffer)
 {
-    if (instrumentation_buffer) {
-        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_ROM_ACCESS_COUNT, 1u, memory_order_relaxed);
-    }
+    INSTRUMENT_INC(instrumentation_buffer, METRIC_ROM_ACCESS_COUNT);
     // avoid division by zero if rom_size < 64: in Rust that would panic on / 0; here we defensively treat blocks=0 -> start=0
     uint32_t blocks = (rom_size / DATASET_ACCESS_SIZE);
     uint32_t start = (blocks == 0) ? 0u : (i % blocks);
@@ -430,9 +433,7 @@ inline uint64_t int_isqrt(uint64_t x) {
 
 
 inline uint64_t special_value64(thread Blake2bState &digest, device atomic_uint *instrumentation_buffer) {
-    if (instrumentation_buffer) {
-        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_SPECIAL_VALUE_COUNT, 1u, memory_order_relaxed);
-    }
+    INSTRUMENT_INC(instrumentation_buffer, METRIC_SPECIAL_VALUE_COUNT);
     // clone the digest state and finalize it, then return first 8 bytes LE
     thread Blake2bState S = digest;
     uint8_t out[64];
@@ -444,10 +445,20 @@ inline uint64_t special_value64(thread Blake2bState &digest, device atomic_uint 
     return v;
 }
 inline uint64_t special1_value64(thread VMState &vm, device atomic_uint *instrumentation_buffer) {
-    return special_value64(vm.prog_digest_state, instrumentation_buffer);
+    if (vm.special1_valid) {
+        return vm.cached_special1_value;
+    }
+    vm.cached_special1_value = special_value64(vm.prog_digest_state, instrumentation_buffer);
+    vm.special1_valid = true;
+    return vm.cached_special1_value;
 }
 inline uint64_t special2_value64(thread VMState &vm, device atomic_uint *instrumentation_buffer) {
-    return special_value64(vm.mem_digest_state, instrumentation_buffer);
+    if (vm.special2_valid) {
+        return vm.cached_special2_value;
+    }
+    vm.cached_special2_value = special_value64(vm.mem_digest_state, instrumentation_buffer);
+    vm.special2_valid = true;
+    return vm.cached_special2_value;
 }
 
 
@@ -457,9 +468,7 @@ void execute_one_instruction(thread VMState &vm,
                              thread const uint8_t *prog_chunk,
                              uint32_t rom_size,
                              device atomic_uint *instrumentation_buffer) {
-    if (instrumentation_buffer) {
-        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_EXECUTE_INSTR_COUNT, 1u, memory_order_relaxed);
-    }
+    INSTRUMENT_INC(instrumentation_buffer, METRIC_EXECUTE_INSTR_COUNT);
     // --- decode opcode byte into "opcode value" (0..255) ---
     uint8_t opcode_byte = prog_chunk[0];
 
@@ -540,11 +549,14 @@ void execute_one_instruction(thread VMState &vm,
     auto mem_access64 = [&](thread VMState &vref, device const uint8_t *rom_p, uint64_t addr) -> uint64_t {
         device const uint8_t *mem = rom_at(rom, rom_size, (uint32_t)addr, instrumentation_buffer);
         uint8_t mem_chunk[64];
+        // Copy 64 bytes - keep original byte-by-byte copy for correctness
         for (uint32_t i = 0; i < 64; ++i) {
             mem_chunk[i] = mem[i];
         }
         // update mem_digest_state with entire 64-byte chunk
         blake2b_update(vm.mem_digest_state, mem_chunk, 64, instrumentation_buffer);
+        // Invalidate special2 cache after mem_digest update
+        vm.special2_valid = false;
         // increment memory_counter (wrapping)
         vm.memory_counter = vm.memory_counter + 1; // wrapping in metal C++ will behave but make sure vm.memory_counter is uint64
         // compute index chunk
@@ -721,6 +733,8 @@ void execute_one_instruction(thread VMState &vm,
 
     // Update program digest with this instruction/chunk
     blake2b_update(vm.prog_digest_state, prog_chunk, INSTR_SIZE, instrumentation_buffer);
+    // Invalidate special1 cache for next instruction
+    vm.special1_valid = false;
 }
 
 

@@ -322,29 +322,30 @@ impl MetalAshmaize {
         })
     }
 
-    pub fn hash<R: crate::rom::RomLike>(
+    pub fn hash_with_timing<R: crate::rom::RomLike>(
         &self,
         salts: &[&[u8]],
         rom: &R,
         nb_loops: u32,
         nb_instrs: u32,
-    ) -> Result<Vec<[u8; 64]>, Box<dyn std::error::Error>> {
+    ) -> Result<(Vec<[u8; 64]>, std::time::Duration, std::time::Duration, std::time::Duration), Box<dyn std::error::Error>> {
+        use std::time::Instant;
+
         if salts.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), std::time::Duration::ZERO, std::time::Duration::ZERO, std::time::Duration::ZERO));
         }
 
         let num_salts = salts.len();
         let salt_len = salts[0].len();
-        // For simplicity, kernel will assume all salts have the same length.
         if salts.iter().any(|s| s.len() != salt_len) {
             return Err("All salts must have the same length for GPU hashing.".into());
         }
 
         let concatenated_salts: Vec<u8> = salts.iter().flat_map(|s| *s).cloned().collect();
-
         let storage_mode = self.storage_mode();
 
-        // Input buffers
+        // TIMING: Buffer creation
+        let buffer_start = Instant::now();
         let rom_buffer = self.device.new_buffer_with_data(
             rom.data().as_ptr() as *const c_void,
             rom.data().len() as u64,
@@ -436,10 +437,16 @@ impl MetalAshmaize {
         compute_encoder.dispatch_threads(grid_size, threadgroup_size);
         compute_encoder.end_encoding();
 
+        let buffer_time = buffer_start.elapsed();
+
+        // TIMING: GPU execution
+        let gpu_start = Instant::now();
         command_buffer.commit();
         command_buffer.wait_until_completed();
+        let gpu_time = gpu_start.elapsed();
 
-        // Read the result
+        // TIMING: Result readback
+        let readback_start = Instant::now();
         let mut results = Vec::with_capacity(num_salts);
         let result_ptr = final_hash_buffer.contents() as *const u8;
         for i in 0..num_salts {
@@ -449,7 +456,20 @@ impl MetalAshmaize {
             }
             results.push(hash);
         }
+        let readback_time = readback_start.elapsed();
 
+        Ok((results, buffer_time, gpu_time, readback_time))
+    }
+
+    pub fn hash<R: crate::rom::RomLike>(
+        &self,
+        salts: &[&[u8]],
+        rom: &R,
+        nb_loops: u32,
+        nb_instrs: u32,
+    ) -> Result<Vec<[u8; 64]>, Box<dyn std::error::Error>> {
+        let (results, _buffer_time, _gpu_time, _readback_time) =
+            self.hash_with_timing(salts, rom, nb_loops, nb_instrs)?;
         Ok(results)
     }
 
@@ -1235,6 +1255,169 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn diagnose_timing_breakdown() {
+        use std::time::Instant;
+
+        println!("\n=== TIMING BREAKDOWN: Where Does The Time Go? ===\n");
+
+        let init_start = Instant::now();
+        let metal = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+        println!("Metal initialization: {:?}", init_start.elapsed());
+
+        let rom_start = Instant::now();
+        let rom = Rom::new(
+            b"diagnostic",
+            RomGenerationType::TwoStep {
+                pre_size: 16 * 1024,
+                mixing_numbers: 4,
+            },
+            1024 * 1024,
+        );
+        println!("ROM creation (1MB): {:?}", rom_start.elapsed());
+
+        // Test with batch of 100
+        let salts: Vec<Vec<u8>> = (0..100)
+            .map(|i| format!("salt_{}", i).into_bytes())
+            .collect();
+        let max_len = salts.iter().map(|s| s.len()).max().unwrap();
+        let padded: Vec<Vec<u8>> = salts
+            .into_iter()
+            .map(|mut s| {
+                s.resize(max_len, 0);
+                s
+            })
+            .collect();
+        let refs: Vec<&[u8]> = padded.iter().map(|s| s.as_slice()).collect();
+
+        println!("\nCalling hash() with batch_size=100...");
+        let total_start = Instant::now();
+        let _result = metal.hash(&refs, &rom, 8, 256).unwrap();
+        let total_time = total_start.elapsed();
+
+        println!("Total GPU time: {:?}", total_time);
+        println!("Per-hash time: {:.2} ms", total_time.as_secs_f64() * 1000.0 / 100.0);
+
+        println!("\n=== Analysis ===");
+        println!("Most time is likely in buffer creation + GPU execution.");
+        println!("We need to instrument hash() to see the breakdown.");
+    }
+
+    #[test]
+    fn diagnose_bottleneck() {
+        use std::time::Instant;
+
+        println!("\n=== DIAGNOSTIC: Finding the Bottleneck ===\n");
+
+        let metal = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+        let rom = Rom::new(
+            b"diagnostic",
+            RomGenerationType::TwoStep {
+                pre_size: 16 * 1024,
+                mixing_numbers: 4,
+            },
+            1024 * 1024, // 1MB ROM
+        );
+
+        let batch_sizes = [1, 10, 100, 1000];
+
+        println!("{:<12} | {:<15} | {:<15} | {:<15} | {:<10}",
+                 "Batch Size", "GPU Total", "GPU per Hash", "CPU per Hash", "Speedup");
+        println!("{:-<80}", "");
+
+        for &size in &batch_sizes {
+            let salts: Vec<Vec<u8>> = (0..size)
+                .map(|i| format!("salt_{}", i).into_bytes())
+                .collect();
+            let max_len = salts.iter().map(|s| s.len()).max().unwrap();
+            let padded: Vec<Vec<u8>> = salts
+                .into_iter()
+                .map(|mut s| {
+                    s.resize(max_len, 0);
+                    s
+                })
+                .collect();
+            let refs: Vec<&[u8]> = padded.iter().map(|s| s.as_slice()).collect();
+
+            // GPU timing
+            let gpu_start = Instant::now();
+            let _gpu_result = metal.hash(&refs, &rom, 8, 256).unwrap();
+            let gpu_total = gpu_start.elapsed();
+            let gpu_per_hash = gpu_total.as_secs_f64() * 1000.0 / size as f64;
+
+            // CPU timing (single hash for fair comparison)
+            let cpu_start = Instant::now();
+            let _cpu_result = crate::b2::hash(&refs[0], &rom, 8, 256);
+            let cpu_per_hash = cpu_start.elapsed().as_secs_f64() * 1000.0;
+
+            let speedup = cpu_per_hash / gpu_per_hash;
+
+            println!(
+                "{:<12} | {:>13.2?} | {:>13.2} ms | {:>13.2} ms | {:>9.2}x",
+                size, gpu_total, gpu_per_hash, cpu_per_hash, speedup
+            );
+        }
+
+        println!("\n=== Analysis ===");
+        println!("Expected GPU speedup for batch=1000: ~100x (CPU limited, GPU parallel)");
+        println!("If speedup is < 10x: GPU has fundamental efficiency problem");
+        println!("If speedup is < 2x: GPU is barely working or has massive overhead");
+        println!("If GPU is SLOWER: Something is very wrong\n");
+    }
+
+    #[test]
+    fn detailed_timing_breakdown() {
+        println!("\n=== DETAILED TIMING BREAKDOWN ===\n");
+
+        let metal = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+        let rom = Rom::new(
+            b"timing",
+            RomGenerationType::TwoStep {
+                pre_size: 16 * 1024,
+                mixing_numbers: 4,
+            },
+            1024 * 1024, // 1MB ROM
+        );
+
+        let batch_sizes = [1, 10, 100, 1000];
+
+        println!("{:<12} | {:<15} | {:<15} | {:<15} | {:<15}",
+                 "Batch Size", "Buffer Create", "GPU Execute", "Readback", "Total");
+        println!("{:-<95}", "");
+
+        for &size in &batch_sizes {
+            let salts: Vec<Vec<u8>> = (0..size)
+                .map(|i| format!("salt_{}", i).into_bytes())
+                .collect();
+            let max_len = salts.iter().map(|s| s.len()).max().unwrap();
+            let padded: Vec<Vec<u8>> = salts
+                .into_iter()
+                .map(|mut s| {
+                    s.resize(max_len, 0);
+                    s
+                })
+                .collect();
+            let refs: Vec<&[u8]> = padded.iter().map(|s| s.as_slice()).collect();
+
+            // Use timing version
+            let (_results, buffer_time, gpu_time, readback_time) =
+                metal.hash_with_timing(&refs, &rom, 8, 256).unwrap();
+
+            let total_time = buffer_time + gpu_time + readback_time;
+
+            println!(
+                "{:<12} | {:>13.2?} | {:>13.2?} | {:>13.2?} | {:>13.2?}",
+                size, buffer_time, gpu_time, readback_time, total_time
+            );
+        }
+
+        println!("\n=== Analysis ===");
+        println!("If Buffer Create dominates: Memory allocation/transfer overhead");
+        println!("If GPU Execute dominates: Actual kernel execution inefficiency");
+        println!("If Readback dominates: Memory copy-back overhead");
+        println!("Look for where the time is actually spent!\n");
     }
 
     #[test]

@@ -282,6 +282,11 @@ struct VMState {
     // Digests as state
     Blake2bState prog_digest_state;
     Blake2bState mem_digest_state;
+    // Cached special values (avoids repeated finalization)
+    uint64_t cached_special1;
+    uint64_t cached_special2;
+    bool special1_valid;
+    bool special2_valid;
 };
 
 // VM initialization function
@@ -334,6 +339,12 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
     vm.ip = 0;
     vm.loop_counter = 0;
     vm.memory_counter = 0;
+
+    // Initialize special value cache as invalid
+    vm.special1_valid = false;
+    vm.special2_valid = false;
+    vm.cached_special1 = 0;
+    vm.cached_special2 = 0;
 }
 
 
@@ -416,10 +427,20 @@ inline uint64_t special_value64(thread Blake2bState &digest) {
     return v;
 }
 inline uint64_t special1_value64(thread VMState &vm) {
-    return special_value64(vm.prog_digest_state);
+    // Use cached value if valid, otherwise compute and cache
+    if (!vm.special1_valid) {
+        vm.cached_special1 = special_value64(vm.prog_digest_state);
+        vm.special1_valid = true;
+    }
+    return vm.cached_special1;
 }
 inline uint64_t special2_value64(thread VMState &vm) {
-    return special_value64(vm.mem_digest_state);
+    // Use cached value if valid, otherwise compute and cache
+    if (!vm.special2_valid) {
+        vm.cached_special2 = special_value64(vm.mem_digest_state);
+        vm.special2_valid = true;
+    }
+    return vm.cached_special2;
 }
 
 
@@ -514,6 +535,8 @@ void execute_one_instruction(thread VMState &vm,
         }
         // update mem_digest_state with entire 64-byte chunk
         blake2b_update(vm.mem_digest_state, mem_chunk, 64);
+        // Invalidate cached special2 value since mem_digest changed
+        vm.special2_valid = false;
         // increment memory_counter (wrapping)
         vm.memory_counter = vm.memory_counter + 1; // wrapping in metal C++ will behave but make sure vm.memory_counter is uint64
         // compute index chunk
@@ -690,6 +713,8 @@ void execute_one_instruction(thread VMState &vm,
 
     // Update program digest with this instruction/chunk
     blake2b_update(vm.prog_digest_state, prog_chunk, INSTR_SIZE);
+    // Invalidate cached special1 value since prog_digest changed
+    vm.special1_valid = false;
 }
 
 

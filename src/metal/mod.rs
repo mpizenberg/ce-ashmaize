@@ -29,11 +29,11 @@ impl MetalAshmaize {
     const TOTAL_METRICS: usize = 5;
 
     pub fn new() -> Option<Self> {
-        println!("Attempting to initialize MetalAshmaize...");
+        eprintln!("Attempting to initialize MetalAshmaize...");
 
         let device = match metal::Device::system_default() {
             Some(device) => {
-                println!("Successfully obtained Metal device: {}", device.name());
+                eprintln!("Successfully obtained Metal device: {}", device.name());
                 device
             }
             None => {
@@ -48,7 +48,7 @@ impl MetalAshmaize {
             &metal::CompileOptions::new(),
         ) {
             Ok(lib) => {
-                println!("Successfully compiled Metal shader library");
+                eprintln!("Successfully compiled Metal shader library");
                 lib
             }
             Err(e) => {
@@ -67,7 +67,7 @@ impl MetalAshmaize {
 
         let kernel_function = match library.get_function("ashmaize_hash", None) {
             Ok(func) => {
-                println!("Successfully retrieved kernel function 'ashmaize_hash'");
+                eprintln!("Successfully retrieved kernel function 'ashmaize_hash'");
                 func
             }
             Err(e) => {
@@ -79,7 +79,7 @@ impl MetalAshmaize {
         let pipeline_state = match device.new_compute_pipeline_state_with_function(&kernel_function)
         {
             Ok(state) => {
-                println!("Successfully created compute pipeline state for ashmaize_hash");
+                eprintln!("Successfully created compute pipeline state for ashmaize_hash");
                 state
             }
             Err(e) => {
@@ -94,7 +94,7 @@ impl MetalAshmaize {
         // --- NEW CODE FOR BLAKE2B TEST KERNEL ---
         let blake2b_kernel_function = match library.get_function("test_blake2b", None) {
             Ok(func) => {
-                println!("Successfully retrieved kernel function 'test_blake2b'");
+                eprintln!("Successfully retrieved kernel function 'test_blake2b'");
                 func
             }
             Err(e) => {
@@ -106,7 +106,7 @@ impl MetalAshmaize {
         let blake2b_pipeline_state =
             match device.new_compute_pipeline_state_with_function(&blake2b_kernel_function) {
                 Ok(state) => {
-                    println!("Successfully created compute pipeline state for test_blake2b");
+                    eprintln!("Successfully created compute pipeline state for test_blake2b");
                     state
                 }
                 Err(e) => {
@@ -121,7 +121,7 @@ impl MetalAshmaize {
         // --- NEW CODE FOR HPRIME TEST KERNEL ---
         let hprime_kernel_function = match library.get_function("test_hprime", None) {
             Ok(func) => {
-                println!("Successfully retrieved kernel function 'test_hprime'");
+                eprintln!("Successfully retrieved kernel function 'test_hprime'");
                 func
             }
             Err(e) => {
@@ -133,7 +133,7 @@ impl MetalAshmaize {
         let hprime_pipeline_state =
             match device.new_compute_pipeline_state_with_function(&hprime_kernel_function) {
                 Ok(state) => {
-                    println!("Successfully created compute pipeline state for test_hprime");
+                    eprintln!("Successfully created compute pipeline state for test_hprime");
                     state
                 }
                 Err(e) => {
@@ -149,7 +149,7 @@ impl MetalAshmaize {
         let post_instructions_kernel_function =
             match library.get_function("test_post_instructions", None) {
                 Ok(func) => {
-                    println!("Successfully retrieved kernel function 'test_post_instructions'");
+                    eprintln!("Successfully retrieved kernel function 'test_post_instructions'");
                     func
                 }
                 Err(e) => {
@@ -165,7 +165,7 @@ impl MetalAshmaize {
             .new_compute_pipeline_state_with_function(&post_instructions_kernel_function)
         {
             Ok(state) => {
-                println!("Successfully created compute pipeline state for test_post_instructions");
+                eprintln!("Successfully created compute pipeline state for test_post_instructions");
                 state
             }
             Err(e) => {
@@ -180,7 +180,7 @@ impl MetalAshmaize {
         // --- NEW CODE FOR VM_INIT TEST KERNEL ---
         let vm_init_kernel_function = match library.get_function("test_vm_init", None) {
             Ok(func) => {
-                println!("Successfully retrieved kernel function 'test_vm_init'");
+                eprintln!("Successfully retrieved kernel function 'test_vm_init'");
                 func
             }
             Err(e) => {
@@ -192,7 +192,7 @@ impl MetalAshmaize {
         let vm_init_pipeline_state =
             match device.new_compute_pipeline_state_with_function(&vm_init_kernel_function) {
                 Ok(state) => {
-                    println!("Successfully created compute pipeline state for test_vm_init");
+                    eprintln!("Successfully created compute pipeline state for test_vm_init");
                     state
                 }
                 Err(e) => {
@@ -208,7 +208,7 @@ impl MetalAshmaize {
         let execute_program_kernel_function =
             match library.get_function("test_execute_program", None) {
                 Ok(func) => {
-                    println!("Successfully retrieved kernel function 'test_execute_program'");
+                    eprintln!("Successfully retrieved kernel function 'test_execute_program'");
                     func
                 }
                 Err(e) => {
@@ -224,7 +224,7 @@ impl MetalAshmaize {
             .new_compute_pipeline_state_with_function(&execute_program_kernel_function)
         {
             Ok(state) => {
-                println!("Successfully created compute pipeline state for test_execute_program");
+                eprintln!("Successfully created compute pipeline state for test_execute_program");
                 state
             }
             Err(e) => {
@@ -242,7 +242,7 @@ impl MetalAshmaize {
             .get_function("test_execute_one_instruction", None)
         {
             Ok(func) => {
-                println!("Successfully retrieved kernel function 'test_execute_one_instruction'");
+                eprintln!("Successfully retrieved kernel function 'test_execute_one_instruction'");
                 func
             }
             Err(e) => {
@@ -258,7 +258,7 @@ impl MetalAshmaize {
             .new_compute_pipeline_state_with_function(&execute_one_instruction_kernel_function)
         {
             Ok(state) => {
-                println!(
+                eprintln!(
                     "Successfully created compute pipeline state for test_execute_one_instruction"
                 );
                 state
@@ -276,7 +276,7 @@ impl MetalAshmaize {
         // --- NEW CODE FOR FINALIZE TEST KERNEL ---
         let finalize_kernel_function = match library.get_function("test_vm_finalize", None) {
             Ok(func) => {
-                println!("Successfully retrieved kernel function 'test_vm_finalize'");
+                eprintln!("Successfully retrieved kernel function 'test_vm_finalize'");
                 func
             }
             Err(e) => {
@@ -291,7 +291,7 @@ impl MetalAshmaize {
         let finalize_pipeline_state =
             match device.new_compute_pipeline_state_with_function(&finalize_kernel_function) {
                 Ok(state) => {
-                    println!("Successfully created compute pipeline state for test_vm_finalize");
+                    eprintln!("Successfully created compute pipeline state for test_vm_finalize");
                     state
                 }
                 Err(e) => {
@@ -304,7 +304,7 @@ impl MetalAshmaize {
             };
         // ---------------------------
 
-        println!("MetalAshmaize initialized successfully");
+        eprintln!("MetalAshmaize initialized successfully");
         Some(Self {
             device,
             command_queue,
@@ -463,28 +463,28 @@ impl MetalAshmaize {
             data
         };
 
-        println!("\n--- GPU Instrumentation Metrics ---");
-        println!(
+        eprintln!("\n--- GPU Instrumentation Metrics ---");
+        eprintln!(
             "Blake2b Round Count: {}",
             instrumentation_data[Self::METRIC_BLAKE2B_ROUND_COUNT]
         );
-        println!(
+        eprintln!(
             "Execute Instruction Count: {}",
             instrumentation_data[Self::METRIC_EXECUTE_INSTR_COUNT]
         );
-        println!(
+        eprintln!(
             "Hprime Count: {}",
             instrumentation_data[Self::METRIC_HPRIME_COUNT]
         );
-        println!(
+        eprintln!(
             "ROM Access Count: {}",
             instrumentation_data[Self::METRIC_ROM_ACCESS_COUNT]
         );
-        println!(
+        eprintln!(
             "Special Value Count: {}",
             instrumentation_data[Self::METRIC_SPECIAL_VALUE_COUNT]
         );
-        println!("-----------------------------------");
+        eprintln!("-----------------------------------");
 
         Ok(results)
     }

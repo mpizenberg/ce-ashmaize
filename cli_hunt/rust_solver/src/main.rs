@@ -1,14 +1,12 @@
-// use ashmaize::{hash, Rom, RomGenerationType};
-use ashmaize::b2::hash; // Use the blake2 implementation (slightly faster)
+use ashmaize::b2::hash as cpu_hash;
+use ashmaize::metal::MetalAshmaize;
+use ashmaize::rom::RomLike;
 use ashmaize::{Rom, RomGenerationType};
 use clap::Parser;
-use rayon::prelude::*;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-const NUM_THREADS: u64 = 5;
 pub const MB: usize = 1024 * 1024;
 pub const GB: usize = 1024 * MB;
+const BATCH_SIZE: usize = 10000; // Number of hashes to compute per GPU batch
 
 mod tests;
 
@@ -52,8 +50,16 @@ pub fn init_rom(no_pre_mine_hex: &str) -> Rom {
 fn main() {
     let args = Args::parse();
 
-    // Initialize AshMaize ROM
+    // Initialize AshMaize ROM (full version for CPU verification)
     let rom = init_rom(&args.no_pre_mine);
+
+    // Create light ROM for GPU (memory-optimized)
+    let light_rom = rom.shrink();
+    eprintln!(
+        "ROM initialized: full size = {} MB, light size = {} MB",
+        rom.data().len() / MB,
+        light_rom.data().len() / MB
+    );
 
     // Parse difficulty from hex string to u32 mask
     let difficulty_mask = u32::from_str_radix(&args.difficulty, 16).unwrap();
@@ -69,40 +75,64 @@ fn main() {
         args.no_pre_mine_hour
     );
 
-    // Share ROM across threads (read-only, no mutex needed)
-    let rom = Arc::new(rom);
+    // Initialize Metal GPU
+    let metal = MetalAshmaize::new().expect("Failed to initialize Metal GPU");
+    eprintln!("Metal GPU initialized successfully");
 
-    let found = Arc::new(AtomicBool::new(false));
-    let result_nonce = Arc::new(AtomicU64::new(0));
-    let start_nonce = 0;
+    let mut current_nonce = 0u64;
+    let mut batch_count = 0u64;
 
-    (0..NUM_THREADS).into_par_iter().for_each(|thread_id| {
-        let rom = Arc::clone(&rom);
-        let mut local_nonce = start_nonce + thread_id as u64;
-        let stride = NUM_THREADS as u64;
+    loop {
+        // Generate batch of preimages
+        let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(BATCH_SIZE);
+        let batch_start_nonce = current_nonce;
 
-        // Reuse preimage buffer across iterations
-        let mut preimage = String::with_capacity(16 + suffix.len());
-
-        while !found.load(Ordering::Relaxed) {
-            preimage.clear();
-            use std::fmt::Write;
-            write!(&mut preimage, "{:016x}{}", local_nonce, &suffix).unwrap();
-
-            // Each hash call allocates ~15-20KB temporarily
-            let hash_result = hash(preimage.as_bytes(), &rom, 8, 256);
-
-            if hash_structure_good(&hash_result, difficulty_mask) {
-                found.store(true, Ordering::Relaxed);
-                result_nonce.store(local_nonce, Ordering::Relaxed);
-                break;
-            }
-
-            local_nonce += stride;
+        for i in 0..BATCH_SIZE {
+            let nonce = batch_start_nonce + i as u64;
+            let preimage = format!("{:016x}{}", nonce, &suffix);
+            preimages.push(preimage.into_bytes());
         }
-    });
 
-    if found.load(Ordering::Relaxed) {
-        println!("{:016x}", result_nonce.load(Ordering::Relaxed));
+        // Convert to slices for Metal API
+        let preimage_slices: Vec<&[u8]> = preimages.iter().map(|p| p.as_slice()).collect();
+
+        // Compute hashes on GPU using LightRom
+        let hash_results = metal
+            .hash(&preimage_slices, &light_rom, 8, 256)
+            .expect("GPU hashing failed");
+
+        // Check results
+        for (i, hash_result) in hash_results.iter().enumerate() {
+            if hash_structure_good(hash_result, difficulty_mask) {
+                let winning_nonce = batch_start_nonce + i as u64;
+                let winning_preimage = &preimages[i];
+
+                // Verify against CPU implementation
+                eprintln!("Found candidate nonce: {:016x}", winning_nonce);
+                eprintln!("Verifying with CPU implementation...");
+                let cpu_result = cpu_hash(winning_preimage, &light_rom, 8, 256);
+
+                if cpu_result != *hash_result {
+                    eprintln!("VERIFICATION FAILED!");
+                    eprintln!("GPU hash: {:02x?}", &hash_result[..8]);
+                    eprintln!("CPU hash: {:02x?}", &cpu_result[..8]);
+                    panic!("GPU and CPU hashes do not match!");
+                }
+
+                eprintln!("Verification successful!");
+                println!("{:016x}", winning_nonce);
+                return;
+            }
+        }
+
+        current_nonce += BATCH_SIZE as u64;
+        batch_count += 1;
+
+        if batch_count % 100 == 0 {
+            eprintln!(
+                "Processed {} batches ({} hashes)...",
+                batch_count, current_nonce
+            );
+        }
     }
 }

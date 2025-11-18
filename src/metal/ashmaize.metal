@@ -198,7 +198,83 @@ void blake2b(thread uint8_t *out, uint outlen, thread const uint8_t *in, uint in
     blake2b_final(S, out, outlen);
 }
 
-// Argon2 H' function
+// Argon2 H' function (device memory output version)
+void hprime(device uint8_t *output, uint output_len, thread const uint8_t *input, uint input_len) {
+    if (output_len <= 64) {
+        uint8_t temp[BLAKE2B_OUTBYTES + 4 + 512];
+        temp[0] = output_len & 0xFF;
+        temp[1] = (output_len >> 8) & 0xFF;
+        temp[2] = (output_len >> 16) & 0xFF;
+        temp[3] = (output_len >> 24) & 0xFF;
+
+        for (uint i = 0; i < input_len; ++i) {
+            temp[4 + i] = input[i];
+        }
+
+        uint8_t result[64];
+        blake2b(result, output_len, temp, 4 + input_len);
+        for (uint i = 0; i < output_len; ++i) {
+            output[i] = result[i];
+        }
+        return;
+    }
+
+    uint output_len_copy = output_len;
+
+    uint8_t v0_input[BLAKE2B_OUTBYTES + 512];
+    v0_input[0] = output_len_copy & 0xFF;
+    v0_input[1] = (output_len_copy >> 8) & 0xFF;
+    v0_input[2] = (output_len_copy >> 16) & 0xFF;
+    v0_input[3] = (output_len_copy >> 24) & 0xFF;
+    for (uint i = 0; i < input_len; ++i) {
+        v0_input[4 + i] = input[i];
+    }
+
+    uint8_t v0_hash[64];
+    blake2b(v0_hash, 64, v0_input, 4 + input_len);
+
+    uint8_t vi_prev[64];
+    for (int i = 0; i < 64; ++i) {
+        vi_prev[i] = v0_hash[i];
+    }
+
+    for (int i = 0; i < 32 && (uint)i < output_len; ++i) {
+        output[i] = vi_prev[i];
+    }
+
+    uint bytes = output_len - 32;
+    uint pos = 32;
+
+    while (bytes > 64) {
+        uint8_t vi_hash[64];
+        blake2b(vi_hash, 64, vi_prev, 64);
+
+        for (int i = 0; i < 64; ++i) {
+            vi_prev[i] = vi_hash[i];
+        }
+
+        for (int i = 0; i < 32; ++i) {
+            if (pos + i < output_len) {
+                output[pos + i] = vi_prev[i];
+            }
+        }
+
+        bytes -= 32;
+        pos += 32;
+    }
+
+    if (bytes > 0) {
+        uint8_t temp[64];
+        blake2b(temp, bytes, vi_prev, 64);
+        for (uint i = 0; i < bytes; ++i) {
+            if (pos + i < output_len) {
+                output[pos + i] = temp[i];
+            }
+        }
+    }
+}
+
+// Argon2 H' function (thread memory output version)
 void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input, uint input_len) {
     if (output_len <= 64) {
         uint8_t temp[BLAKE2B_OUTBYTES + 4 + 512]; // Max 64 (output_len) + 4 (output_len_bytes) + 512 (max input_len)
@@ -796,16 +872,45 @@ void post_instructions(thread VMState &vm) {
 
 // Program struct (not directly used as an object in kernel, raw buffer passed)
 
-void program_shuffle(thread uint8_t *program_buffer, uint32_t program_size, thread const uint8_t *seed) {
+void program_shuffle(device uint8_t *program_buffer, uint32_t program_size, thread const uint8_t *seed) {
+    // Use device memory version of hprime (no temp buffer needed!)
     hprime(program_buffer, program_size, seed, 64);
 }
 
-// Execute program function (for a single loop iteration)
+// Execute program function (for a single loop iteration) - Device memory version
+void execute_program(thread VMState &vm, device const uint8_t *rom,
+                     device uint8_t *program_buffer, uint32_t rom_size,
+                     uint32_t nb_instrs, uint32_t program_size) {
+    // Shuffle program using the current prog_seed
+    program_shuffle(program_buffer, program_size, vm.prog_seed);
+
+    // Execute instructions for this specific thread
+    for (uint32_t i = 0; i < nb_instrs; i++) {
+        // Calculate the actual byte offset into the program_buffer with wrapping
+        // This replicates Rust's Program::at(vm.ip) behavior
+        uint32_t current_program_instruction_index = vm.ip % nb_instrs; // vm.ip is global, nb_instrs is the program length
+        uint32_t byte_offset = current_program_instruction_index * INSTR_SIZE;
+
+        // Copy instruction from device memory to thread memory (required for execute_one_instruction)
+        thread uint8_t instr_copy[INSTR_SIZE];
+        for (uint32_t j = 0; j < INSTR_SIZE; ++j) {
+            instr_copy[j] = program_buffer[byte_offset + j];
+        }
+
+        execute_one_instruction(vm, rom, instr_copy, rom_size);
+        vm.ip++; // Increment global instruction pointer
+    }
+
+    // Post instructions
+    post_instructions(vm);
+}
+
+// Execute program function (for a single loop iteration) - Thread memory version (for tests)
 void execute_program(thread VMState &vm, device const uint8_t *rom,
                      thread uint8_t *program_buffer, uint32_t rom_size,
                      uint32_t nb_instrs, uint32_t program_size) {
     // Shuffle program using the current prog_seed
-    program_shuffle(program_buffer, program_size, vm.prog_seed);
+    hprime(program_buffer, program_size, vm.prog_seed, 64);
 
     // Execute instructions for this specific thread
     for (uint32_t i = 0; i < nb_instrs; i++) {
@@ -872,6 +977,10 @@ kernel void ashmaize_hash(
 
     // outputs
     device uint8_t *final_hash [[buffer(7)]],
+
+    // program buffers (one per thread)
+    device uint8_t *program_buffers [[buffer(8)]],
+
     uint id [[thread_position_in_grid]]
 ) {
     // Select the salt for the current thread
@@ -886,17 +995,19 @@ kernel void ashmaize_hash(
     VMState vm;
     vm_init(vm, local_rom_digest, rom_digest_len, my_salt, salt_len);
 
+    // Use device memory program buffer for this thread (saves 5KB thread stack)
     // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes.
-    thread uint8_t local_program_buffer[5120];
+    uint32_t program_size = nb_instrs * INSTR_SIZE;
+    device uint8_t *my_program_buffer = program_buffers + (id * 5120);
 
     // Initialize program with zeros (as is done in VM::new)
-    for (uint32_t i = 0; i < nb_instrs * INSTR_SIZE; i++) {
-        local_program_buffer[i] = 0;
+    for (uint32_t i = 0; i < program_size; i++) {
+        my_program_buffer[i] = 0;
     }
 
     // Execute the hash computation
     for (uint32_t loop = 0; loop < nb_loops; loop++) {
-        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120);
+        execute_program(vm, rom_array, my_program_buffer, rom_size, nb_instrs, 5120);
     }
 
     // Finalize the result and write to output buffer

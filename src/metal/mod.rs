@@ -396,6 +396,14 @@ impl MetalAshmaize {
             storage_mode,
         );
 
+        // Program buffers - one per thread (saves 5KB thread-local memory per thread)
+        // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes
+        let program_buffer_size = 5120u64;
+        let program_buffers = self.device.new_buffer(
+            program_buffer_size * num_salts as u64,
+            storage_mode,
+        );
+
         // Command encoding
         let command_buffer = self.command_queue.new_command_buffer();
         let compute_encoder = command_buffer.new_compute_command_encoder();
@@ -410,6 +418,7 @@ impl MetalAshmaize {
         compute_encoder.set_buffer(5, Some(&nb_instrs_buffer), 0);
         compute_encoder.set_buffer(6, Some(&nb_loops_buffer), 0);
         compute_encoder.set_buffer(7, Some(&final_hash_buffer), 0);
+        compute_encoder.set_buffer(8, Some(&program_buffers), 0);
 
         let grid_size = MTLSize {
             width: num_salts as u64,

@@ -1137,9 +1137,9 @@ mod tests {
         let light_rom = full_rom.shrink();
         assert!(light_rom.data().len() < full_rom.data().len());
 
-        let salt_ok: [u8; _] = [0x73, 0x61, 0x6c, 0x74, 0x5f, 0x30];
+        // let salt_ok: [u8; _] = [0x73, 0x61, 0x6c, 0x74, 0x5f, 0x30];
         let salt_ko: [u8; _] = [0x73, 0x61, 0x6c, 0x74, 0x5f, 0x30, 0x00];
-        let salt = salt_ok;
+        let salt = salt_ko;
 
         // 3. Calculate the expected hash on the CPU for comparison
         let expected_hash = crate::b2::hash(&salt, &full_rom, 8, 256);

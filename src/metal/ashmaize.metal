@@ -396,9 +396,10 @@ inline uint64_t int_isqrt(uint64_t x) {
         if (nr >= r) break;
         r = nr;
     }
-    // fix possible overshoot
-    while ((r+1) * (r+1) <= x) ++r;
-    while (r * r > x) --r;
+    // fix possible overshoot, but avoid overflow in multiplication
+    // Check for potential overflow before multiplication
+    while (r < 0xFFFFFFFFFFFFFFFFULL && (r+1) <= x / (r+1) && (r+1) * (r+1) <= x) ++r;
+    while (r > 0 && (r > x / r || r * r > x)) --r;
     return r;
 }
 

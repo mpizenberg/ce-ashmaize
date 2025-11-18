@@ -20,6 +20,14 @@ pub struct MetalAshmaize {
 }
 
 impl MetalAshmaize {
+    // Instrumentation Metrics (must match ashmaize.metal)
+    const METRIC_BLAKE2B_ROUND_COUNT: usize = 0;
+    const METRIC_EXECUTE_INSTR_COUNT: usize = 1;
+    const METRIC_HPRIME_COUNT: usize = 2;
+    const METRIC_ROM_ACCESS_COUNT: usize = 3;
+    const METRIC_SPECIAL_VALUE_COUNT: usize = 4;
+    const TOTAL_METRICS: usize = 5;
+
     pub fn new() -> Option<Self> {
         println!("Attempting to initialize MetalAshmaize...");
 
@@ -335,17 +343,17 @@ impl MetalAshmaize {
         let rom_buffer = self.device.new_buffer_with_data(
             rom.data().as_ptr() as *const c_void,
             rom.data().len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            metal::MTLResourceOptions::StorageModeShared,
         );
         let rom_digest_buffer = self.device.new_buffer_with_data(
             rom.digest().0.as_ptr() as *const c_void,
             rom.digest().0.len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            metal::MTLResourceOptions::StorageModeShared,
         );
         let salt_buffer = self.device.new_buffer_with_data(
             concatenated_salts.as_ptr() as *const c_void,
             concatenated_salts.len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            metal::MTLResourceOptions::StorageModeShared,
         );
 
         // Constant buffers
@@ -383,6 +391,19 @@ impl MetalAshmaize {
             metal::MTLResourceOptions::StorageModeManaged,
         );
 
+        // Instrumentation buffer
+        let instrumentation_buffer = self.device.new_buffer(
+            (Self::TOTAL_METRICS * std::mem::size_of::<u32>()) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        // Initialize to zeros
+        let instrumentation_ptr = instrumentation_buffer.contents() as *mut u32;
+        for i in 0..Self::TOTAL_METRICS {
+            unsafe {
+                *instrumentation_ptr.add(i) = 0;
+            }
+        }
+
         // Command encoding
         let command_buffer = self.command_queue.new_command_buffer();
         let compute_encoder = command_buffer.new_compute_command_encoder();
@@ -397,6 +418,7 @@ impl MetalAshmaize {
         compute_encoder.set_buffer(5, Some(&nb_instrs_buffer), 0);
         compute_encoder.set_buffer(6, Some(&nb_loops_buffer), 0);
         compute_encoder.set_buffer(7, Some(&final_hash_buffer), 0);
+        compute_encoder.set_buffer(8, Some(&instrumentation_buffer), 0); // New instrumentation buffer
 
         let grid_size = MTLSize {
             width: num_salts as u64,
@@ -427,6 +449,27 @@ impl MetalAshmaize {
             }
             results.push(hash);
         }
+
+        // Read and print instrumentation data
+        let instrumentation_data = {
+            let mut data = vec![0u32; Self::TOTAL_METRICS];
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    instrumentation_buffer.contents() as *const u32,
+                    data.as_mut_ptr(),
+                    Self::TOTAL_METRICS,
+                );
+            }
+            data
+        };
+
+        println!("\n--- GPU Instrumentation Metrics ---");
+        println!("Blake2b Round Count: {}", instrumentation_data[Self::METRIC_BLAKE2B_ROUND_COUNT]);
+        println!("Execute Instruction Count: {}", instrumentation_data[Self::METRIC_EXECUTE_INSTR_COUNT]);
+        println!("Hprime Count: {}", instrumentation_data[Self::METRIC_HPRIME_COUNT]);
+        println!("ROM Access Count: {}", instrumentation_data[Self::METRIC_ROM_ACCESS_COUNT]);
+        println!("Special Value Count: {}", instrumentation_data[Self::METRIC_SPECIAL_VALUE_COUNT]);
+        println!("-----------------------------------");
 
         Ok(results)
     }

@@ -15,6 +15,14 @@ constant uint DIGEST_INIT_SIZE = 64;
 constant uint REGS_CONTENT_SIZE = 256; // sizeof(Register) * NB_REGS (8 * 32)
 
 
+// Instrumentation Metrics
+constant uint METRIC_BLAKE2B_ROUND_COUNT = 0;
+constant uint METRIC_EXECUTE_INSTR_COUNT = 1;
+constant uint METRIC_HPRIME_COUNT = 2;
+constant uint METRIC_ROM_ACCESS_COUNT = 3;
+constant uint METRIC_SPECIAL_VALUE_COUNT = 4;
+constant uint TOTAL_METRICS = 5;
+
 // Blake2b constants
 constant uint BLAKE2B_BLOCKBYTES = 128;
 constant uint BLAKE2B_OUTBYTES = 64;
@@ -61,7 +69,10 @@ void blake2b_G(thread uint64_t &a, thread uint64_t &b, thread uint64_t &c, threa
 }
 
 // Round function for Blake2b
-void blake2b_round(thread Blake2bState &S, thread const uint64_t *m) {
+void blake2b_round(thread Blake2bState &S, thread const uint64_t *m, device atomic_uint *instrumentation_buffer) {
+    if (instrumentation_buffer) {
+        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_BLAKE2B_ROUND_COUNT, 1u, memory_order_relaxed);
+    }
     uint64_t v[16]; // Local 16-word state vector for compression
 
     // Initialize v
@@ -106,7 +117,7 @@ void blake2b_init(thread Blake2bState &S, uint outlen) {
 }
 
 // Update Blake2b state with data
-void blake2b_update(thread Blake2bState &S, thread const uint8_t *in, uint64_t inlen) {
+void blake2b_update(thread Blake2bState &S, thread const uint8_t *in, uint64_t inlen, device atomic_uint *instrumentation_buffer) {
     thread const uint8_t *current_in = in;
     while (inlen > 0) {
         uint64_t left = S.buflen;
@@ -134,7 +145,7 @@ void blake2b_update(thread Blake2bState &S, thread const uint8_t *in, uint64_t i
                        ((uint64_t)S.buf[i * 8 + 7] << 56);
             }
 
-            blake2b_round(S, m);
+            blake2b_round(S, m, instrumentation_buffer);
 
             current_in += fill;
             inlen -= fill;
@@ -150,7 +161,7 @@ void blake2b_update(thread Blake2bState &S, thread const uint8_t *in, uint64_t i
 }
 
 // Finalize Blake2b and get result
-void blake2b_final(thread Blake2bState &S, thread uint8_t *out, uint outlen) {
+void blake2b_final(thread Blake2bState &S, thread uint8_t *out, uint outlen, device atomic_uint *instrumentation_buffer) {
     uint64_t lastblock = S.buflen;
     S.t[0] += lastblock;
     if (S.t[0] < lastblock) S.t[1]++;
@@ -174,7 +185,7 @@ void blake2b_final(thread Blake2bState &S, thread uint8_t *out, uint outlen) {
                    ((uint64_t)S.buf[i * 8 + 7] << 56);
         }
 
-        blake2b_round(S, m);
+        blake2b_round(S, m, instrumentation_buffer);
     }
 
     for (uint i = 0; i < 8; ++i) {
@@ -191,15 +202,18 @@ void blake2b_final(thread Blake2bState &S, thread uint8_t *out, uint outlen) {
 }
 
 // Blake2b hash function
-void blake2b(thread uint8_t *out, uint outlen, thread const uint8_t *in, uint inlen) {
+void blake2b(thread uint8_t *out, uint outlen, thread const uint8_t *in, uint inlen, device atomic_uint *instrumentation_buffer) {
     Blake2bState S;
     blake2b_init(S, outlen);
-    blake2b_update(S, in, inlen);
-    blake2b_final(S, out, outlen);
+    blake2b_update(S, in, inlen, instrumentation_buffer);
+    blake2b_final(S, out, outlen, instrumentation_buffer);
 }
 
 // Argon2 H' function
-void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input, uint input_len) {
+void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input, uint input_len, device atomic_uint *instrumentation_buffer) {
+    if (instrumentation_buffer) {
+        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_HPRIME_COUNT, 1u, memory_order_relaxed);
+    }
     if (output_len <= 64) {
         uint8_t temp[BLAKE2B_OUTBYTES + 4 + 512]; // Max 64 (output_len) + 4 (output_len_bytes) + 512 (max input_len)
         temp[0] = output_len & 0xFF;
@@ -211,7 +225,7 @@ void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input
             temp[4 + i] = input[i];
         }
 
-        blake2b(output, output_len, temp, 4 + input_len);
+        blake2b(output, output_len, temp, 4 + input_len, instrumentation_buffer);
         return;
     }
 
@@ -228,7 +242,7 @@ void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input
     }
 
     uint8_t v0_hash[64];
-    blake2b(v0_hash, 64, v0_input, 4 + input_len);
+    blake2b(v0_hash, 64, v0_input, 4 + input_len, instrumentation_buffer);
 
     uint8_t vi_prev[64];
     for (int i = 0; i < 64; ++i) {
@@ -245,7 +259,7 @@ void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input
 
     while (bytes > 64) {
         uint8_t vi_hash[64];
-        blake2b(vi_hash, 64, vi_prev, 64);
+        blake2b(vi_hash, 64, vi_prev, 64, instrumentation_buffer);
 
         for (int i = 0; i < 64; ++i) {
             vi_prev[i] = vi_hash[i];
@@ -263,7 +277,7 @@ void hprime(thread uint8_t *output, uint output_len, thread const uint8_t *input
 
     if (bytes > 0) {
         uint8_t temp[64];
-        blake2b(temp, bytes, vi_prev, 64);
+        blake2b(temp, bytes, vi_prev, 64, instrumentation_buffer);
         for (uint i = 0; i < bytes; ++i) {
             if (pos + i < output_len) {
                 output[pos + i] = temp[i];
@@ -282,11 +296,16 @@ struct VMState {
     // Digests as state
     Blake2bState prog_digest_state;
     Blake2bState mem_digest_state;
+    // Caching for special values
+    uint64_t cached_special1_value;
+    bool special1_value_is_cached;
+    uint64_t cached_special2_value;
+    bool special2_value_is_cached;
 };
 
 // VM initialization function
 void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_digest_len,
-             device const uint8_t *salt, uint32_t salt_len) {
+             device const uint8_t *salt, uint32_t salt_len, device atomic_uint *instrumentation_buffer) {
 
     uint8_t init_buffer[REGS_CONTENT_SIZE + 3 * DIGEST_INIT_SIZE]; // Only need for regs and initial digest updates
 
@@ -300,7 +319,7 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
     }
 
     hprime(init_buffer, REGS_CONTENT_SIZE + 3 * DIGEST_INIT_SIZE,
-           init_buffer_input, rom_digest_len + salt_len);
+           init_buffer_input, rom_digest_len + salt_len, instrumentation_buffer);
 
     // Initialize registers from first part of init_buffer
     thread const uint8_t *init_buffer_regs = init_buffer;
@@ -320,11 +339,11 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
 
     // Prog digest initialization
     blake2b_init(vm.prog_digest_state, 64);
-    blake2b_update(vm.prog_digest_state, digests_data, 64);
+    blake2b_update(vm.prog_digest_state, digests_data, 64, instrumentation_buffer);
 
     // Mem digest initialization
     blake2b_init(vm.mem_digest_state, 64);
-    blake2b_update(vm.mem_digest_state, &digests_data[64], 64);
+    blake2b_update(vm.mem_digest_state, &digests_data[64], 64, instrumentation_buffer);
 
     // Prog seed is provided as an argument, from CPU pre-calculation
     for (int i = 0; i < 64; ++i) {
@@ -334,6 +353,8 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
     vm.ip = 0;
     vm.loop_counter = 0;
     vm.memory_counter = 0;
+    vm.special1_value_is_cached = false;
+    vm.special2_value_is_cached = false;
 }
 
 
@@ -360,8 +381,12 @@ enum Op2Type {
 constant uint32_t DATASET_ACCESS_SIZE = 64;
 inline device const uint8_t* rom_at(device const uint8_t *rom,
                                     uint32_t rom_size,
-                                    uint32_t i)
+                                    uint32_t i,
+                                    device atomic_uint *instrumentation_buffer)
 {
+    if (instrumentation_buffer) {
+        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_ROM_ACCESS_COUNT, 1u, memory_order_relaxed);
+    }
     // avoid division by zero if rom_size < 64: in Rust that would panic on / 0; here we defensively treat blocks=0 -> start=0
     uint32_t blocks = (rom_size / DATASET_ACCESS_SIZE);
     uint32_t start = (blocks == 0) ? 0u : (i % blocks);
@@ -404,22 +429,25 @@ inline uint64_t int_isqrt(uint64_t x) {
 }
 
 
-inline uint64_t special_value64(thread Blake2bState &digest) {
+inline uint64_t special_value64(thread Blake2bState &digest, device atomic_uint *instrumentation_buffer) {
+    if (instrumentation_buffer) {
+        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_SPECIAL_VALUE_COUNT, 1u, memory_order_relaxed);
+    }
     // clone the digest state and finalize it, then return first 8 bytes LE
     thread Blake2bState S = digest;
     uint8_t out[64];
-    blake2b_final(S, out, 64);
+    blake2b_final(S, out, 64, instrumentation_buffer);
     uint64_t v = 0ull;
     for (int i = 0; i < 8; ++i) {
         v |= (uint64_t)out[i] << (8 * i);
     }
     return v;
 }
-inline uint64_t special1_value64(thread VMState &vm) {
-    return special_value64(vm.prog_digest_state);
+inline uint64_t special1_value64(thread VMState &vm, device atomic_uint *instrumentation_buffer) {
+    return special_value64(vm.prog_digest_state, instrumentation_buffer);
 }
-inline uint64_t special2_value64(thread VMState &vm) {
-    return special_value64(vm.mem_digest_state);
+inline uint64_t special2_value64(thread VMState &vm, device atomic_uint *instrumentation_buffer) {
+    return special_value64(vm.mem_digest_state, instrumentation_buffer);
 }
 
 
@@ -427,8 +455,11 @@ inline uint64_t special2_value64(thread VMState &vm) {
 void execute_one_instruction(thread VMState &vm,
                              device const uint8_t *rom,
                              thread const uint8_t *prog_chunk,
-                             uint32_t rom_size) {
-
+                             uint32_t rom_size,
+                             device atomic_uint *instrumentation_buffer) {
+    if (instrumentation_buffer) {
+        atomic_fetch_add_explicit(instrumentation_buffer + METRIC_EXECUTE_INSTR_COUNT, 1u, memory_order_relaxed);
+    }
     // --- decode opcode byte into "opcode value" (0..255) ---
     uint8_t opcode_byte = prog_chunk[0];
 
@@ -507,13 +538,13 @@ void execute_one_instruction(thread VMState &vm,
 
     // Corresponds to Rust macro mem_access64!(vm, rom, addr)
     auto mem_access64 = [&](thread VMState &vref, device const uint8_t *rom_p, uint64_t addr) -> uint64_t {
-        device const uint8_t *mem = rom_at(rom, rom_size, (uint32_t)addr);
+        device const uint8_t *mem = rom_at(rom, rom_size, (uint32_t)addr, instrumentation_buffer);
         uint8_t mem_chunk[64];
         for (uint32_t i = 0; i < 64; ++i) {
             mem_chunk[i] = mem[i];
         }
         // update mem_digest_state with entire 64-byte chunk
-        blake2b_update(vm.mem_digest_state, mem_chunk, 64);
+        blake2b_update(vm.mem_digest_state, mem_chunk, 64, instrumentation_buffer);
         // increment memory_counter (wrapping)
         vm.memory_counter = vm.memory_counter + 1; // wrapping in metal C++ will behave but make sure vm.memory_counter is uint64
         // compute index chunk
@@ -534,8 +565,8 @@ void execute_one_instruction(thread VMState &vm,
             case OP_REG: src1 = vm.regs[r1]; break;
             case OP_MEM: src1 = mem_access64(vm, rom, lit1); break;
             case OP_LIT: src1 = lit1; break;
-            case OP_SP1: src1 = special1_value64(vm); break;
-            default:      src1 = special2_value64(vm); break;
+            case OP_SP1: src1 = special1_value64(vm, instrumentation_buffer); break;
+            default:      src1 = special2_value64(vm, instrumentation_buffer); break;
         }
         // fetch src2
         uint64_t src2;
@@ -543,8 +574,8 @@ void execute_one_instruction(thread VMState &vm,
             case OP_REG: src2 = vm.regs[r2]; break;
             case OP_MEM: src2 = mem_access64(vm, rom, lit2); break;
             case OP_LIT: src2 = lit2; break;
-            case OP_SP1: src2 = special1_value64(vm); break;
-            default:      src2 = special2_value64(vm); break;
+            case OP_SP1: src2 = special1_value64(vm, instrumentation_buffer); break;
+            default:      src2 = special2_value64(vm, instrumentation_buffer); break;
         }
 
         uint64_t result = 0;
@@ -588,7 +619,7 @@ void execute_one_instruction(thread VMState &vm,
             }
             case Div: {
                 if (src2 == 0) {
-                    result = special1_value64(vm);
+                    result = special1_value64(vm, instrumentation_buffer);
                 } else {
                     result = src1 / src2;
                 }
@@ -598,7 +629,7 @@ void execute_one_instruction(thread VMState &vm,
                 // Note: The provided Rust reference has a bug: Mod returns src1 / src2 (same as Div).
                 // We reproduce that bug exactly here.
                 if (src2 == 0) {
-                    result = special1_value64(vm);
+                    result = special1_value64(vm, instrumentation_buffer);
                 } else {
                     // reproduce the reference bug: division instead of modulus
                     result = src1 / src2;
@@ -616,7 +647,7 @@ void execute_one_instruction(thread VMState &vm,
                 for (int i = 0; i < 8; ++i) input16[8 + i] = (uint8_t)((src2 >> (8 * i)) & 0xFFu);
 
                 uint8_t digest64[64];
-                blake2b(digest64, 64, input16, 16);
+                blake2b(digest64, 64, input16, 16, instrumentation_buffer);
 
                 // take chunk hash_index (0..7) of 8 bytes and interpret as little-endian u64
                 thread uint8_t *chunk = &(digest64[hash_index * 8]);
@@ -642,8 +673,8 @@ void execute_one_instruction(thread VMState &vm,
             case OP_REG: src1 = vm.regs[r1]; break;
             case OP_MEM: src1 = mem_access64(vm, rom, lit1); break;
             case OP_LIT: src1 = lit1; break;
-            case OP_SP1: src1 = special1_value64(vm); break;
-            default:      src1 = special2_value64(vm); break;
+            case OP_SP1: src1 = special1_value64(vm, instrumentation_buffer); break;
+            default:      src1 = special2_value64(vm, instrumentation_buffer); break;
         }
 
         uint64_t result = 0;
@@ -689,12 +720,12 @@ void execute_one_instruction(thread VMState &vm,
     } // end if is_op3
 
     // Update program digest with this instruction/chunk
-    blake2b_update(vm.prog_digest_state, prog_chunk, INSTR_SIZE);
+    blake2b_update(vm.prog_digest_state, prog_chunk, INSTR_SIZE, instrumentation_buffer);
 }
 
 
 // Post instructions processing
-void post_instructions(thread VMState &vm) {
+void post_instructions(thread VMState &vm, device atomic_uint *instrumentation_buffer) {
     // Sum all registers
     uint64_t sum_regs = 0;
     for (uint i = 0; i < NB_REGS; ++i) {
@@ -714,15 +745,15 @@ void post_instructions(thread VMState &vm) {
     uint8_t prog_value[64];
     {
         Blake2bState temp_state = vm.prog_digest_state;
-        blake2b_update(temp_state, sum_regs_bytes, 8);
-        blake2b_final(temp_state, prog_value, 64);
+        blake2b_update(temp_state, sum_regs_bytes, 8, instrumentation_buffer);
+        blake2b_final(temp_state, prog_value, 64, instrumentation_buffer);
     }
 
     uint8_t mem_value[64];
     {
         Blake2bState temp_state = vm.mem_digest_state;
-        blake2b_update(temp_state, sum_regs_bytes, 8);
-        blake2b_final(temp_state, mem_value, 64);
+        blake2b_update(temp_state, sum_regs_bytes, 8, instrumentation_buffer);
+        blake2b_final(temp_state, mem_value, 64, instrumentation_buffer);
     }
 
     // Create mixing value
@@ -740,12 +771,12 @@ void post_instructions(thread VMState &vm) {
     mixing_input[131] = (vm.loop_counter >> 24) & 0xFF;
 
     uint8_t mixing_value[64];
-    blake2b(mixing_value, 64, mixing_input, 132); // Input length is 128 (digests) + 4 (loop_counter) = 132
+    blake2b(mixing_value, 64, mixing_input, 132, instrumentation_buffer); // Input length is 128 (digests) + 4 (loop_counter) = 132
 
     // Apply mixing to registers (correct implementation matching Rust)
     uint32_t output_mix_len = NB_REGS * REGISTER_SIZE * 32; // 32 * 8 * 32 = 8192 bytes
     thread uint8_t mixing_out[8192];
-    hprime(mixing_out, output_mix_len, mixing_value, 64);
+    hprime(mixing_out, output_mix_len, mixing_value, 64, instrumentation_buffer);
 
     for (uint32_t block_idx = 0; block_idx < 32; ++block_idx) { // 32 blocks as per Rust implementation
         thread const uint8_t *current_block_ptr = mixing_out + (block_idx * NB_REGS * REGISTER_SIZE);
@@ -771,16 +802,17 @@ void post_instructions(thread VMState &vm) {
 
 // Program struct (not directly used as an object in kernel, raw buffer passed)
 
-void program_shuffle(thread uint8_t *program_buffer, uint32_t program_size, thread const uint8_t *seed) {
-    hprime(program_buffer, program_size, seed, 64);
+void program_shuffle(thread uint8_t *program_buffer, uint32_t program_size, thread const uint8_t *seed, device atomic_uint *instrumentation_buffer) {
+    hprime(program_buffer, program_size, seed, 64, instrumentation_buffer);
 }
 
 // Execute program function (for a single loop iteration)
 void execute_program(thread VMState &vm, device const uint8_t *rom,
                      thread uint8_t *program_buffer, uint32_t rom_size,
-                     uint32_t nb_instrs, uint32_t program_size) {
+                     uint32_t nb_instrs, uint32_t program_size,
+                     device atomic_uint *instrumentation_buffer) {
     // Shuffle program using the current prog_seed
-    program_shuffle(program_buffer, program_size, vm.prog_seed);
+    program_shuffle(program_buffer, program_size, vm.prog_seed, instrumentation_buffer);
 
     // Execute instructions for this specific thread
     for (uint32_t i = 0; i < nb_instrs; i++) {
@@ -789,21 +821,21 @@ void execute_program(thread VMState &vm, device const uint8_t *rom,
         uint32_t current_program_instruction_index = vm.ip % nb_instrs; // vm.ip is global, nb_instrs is the program length
         uint32_t byte_offset = current_program_instruction_index * INSTR_SIZE;
 
-        execute_one_instruction(vm, rom, &program_buffer[byte_offset], rom_size);
+        execute_one_instruction(vm, rom, &program_buffer[byte_offset], rom_size, instrumentation_buffer);
         vm.ip++; // Increment global instruction pointer
     }
 
     // Post instructions
-    post_instructions(vm);
+    post_instructions(vm, instrumentation_buffer);
 }
 
 // Finalize VM and get result
-void vm_finalize(thread VMState &vm, thread uint8_t *result) {
+void vm_finalize(thread VMState &vm, thread uint8_t *result, device atomic_uint *instrumentation_buffer) {
     uint8_t prog_digest_final[64];
-    blake2b_final(vm.prog_digest_state, prog_digest_final, 64);
+    blake2b_final(vm.prog_digest_state, prog_digest_final, 64, instrumentation_buffer);
 
     uint8_t mem_digest_final[64];
-    blake2b_final(vm.mem_digest_state, mem_digest_final, 64);
+    blake2b_final(vm.mem_digest_state, mem_digest_final, 64, instrumentation_buffer);
 
     // Calculate final digest
     uint8_t context_input[512];  // enough space for digests + counter + registers
@@ -832,7 +864,7 @@ void vm_finalize(thread VMState &vm, thread uint8_t *result) {
         }
     }
 
-    blake2b(result, 64, context_input, pos);
+    blake2b(result, 64, context_input, pos, instrumentation_buffer);
 }
 
 // Main compute kernel
@@ -847,6 +879,7 @@ kernel void ashmaize_hash(
 
     // outputs
     device uint8_t *final_hash [[buffer(7)]],
+    device atomic_uint *instrumentation_buffer [[buffer(8)]],
     uint id [[thread_position_in_grid]]
 ) {
     // Select the salt for the current thread
@@ -859,7 +892,7 @@ kernel void ashmaize_hash(
         local_rom_digest[i] = rom_digest_array[i];
     }
     VMState vm;
-    vm_init(vm, local_rom_digest, rom_digest_len, my_salt, salt_len);
+    vm_init(vm, local_rom_digest, rom_digest_len, my_salt, salt_len, instrumentation_buffer);
 
     // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes.
     thread uint8_t local_program_buffer[5120];
@@ -871,12 +904,12 @@ kernel void ashmaize_hash(
 
     // Execute the hash computation
     for (uint32_t loop = 0; loop < nb_loops; loop++) {
-        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120);
+        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120, instrumentation_buffer);
     }
 
     // Finalize the result and write to output buffer
     thread uint8_t result[64];
-    vm_finalize(vm, result);
+    vm_finalize(vm, result, instrumentation_buffer);
 
     // Select the output location for the current thread
     device uint8_t *my_final_hash = final_hash + (id * 64);
@@ -898,7 +931,7 @@ kernel void test_blake2b(
         }
 
         thread uint8_t local_output[64];
-        blake2b(local_output, 64, local_input, input_len);
+        blake2b(local_output, 64, local_input, input_len, nullptr); // No instrumentation for test kernels
 
         for(uint i = 0; i < 64; ++i) {
             output[i] = local_output[i];
@@ -924,7 +957,7 @@ kernel void test_hprime(
             local_input[i] = input[i];
         }
 
-        hprime(local_output, output_len_param, local_input, input_len_param);
+        hprime(local_output, output_len_param, local_input, input_len_param, nullptr); // No instrumentation for test kernels
 
         for(uint i = 0; i < output_len_param; ++i) {
             if (i < 8192) { // Safety check against local_output buffer overflow
@@ -955,7 +988,7 @@ kernel void test_vm_init(
         }
 
         VMState vm;
-        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len, nullptr); // No instrumentation for test kernels
 
         // Copy outputs (excluding prog_digest_state and mem_digest_state as requested)
         for (uint i = 0; i < NB_REGS; ++i) {
@@ -991,10 +1024,10 @@ kernel void test_post_instructions(
             local_rom_digest[i] = rom_digest_array[i];
         }
         VMState vm;
-        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len, nullptr); // No instrumentation for test kernels
 
         // Call the post_instructions kernel
-        post_instructions(vm);
+        post_instructions(vm, nullptr); // No instrumentation for test kernels
 
         // Copy modified state back to output buffers
         for (uint i = 0; i < NB_REGS; ++i) {
@@ -1028,7 +1061,7 @@ kernel void test_execute_program(
             local_rom_digest[i] = rom_digest_array[i];
         }
         VMState vm;
-        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len, nullptr); // No instrumentation for test kernels
 
         // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes.
         thread uint8_t local_program_buffer[5120];
@@ -1039,7 +1072,7 @@ kernel void test_execute_program(
         }
 
         // Now execute the program
-        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120);
+        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120, nullptr); // No instrumentation for test kernels
 
         // Copy modified registers back to output buffer
         for (uint i = 0; i < NB_REGS; ++i) {
@@ -1076,14 +1109,14 @@ kernel void test_execute_one_instruction(
         local_rom_digest[i] = rom_digest_array[i];
     }
     thread VMState vm;
-    vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+    vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len, nullptr); // No instrumentation for test kernels
 
     // 2. Execute the single instruction
     thread uint8_t local_prog_chunk[20];
     for (uint i = 0; i < 20; ++i) {
         local_prog_chunk[i] = prog_chunk[i];
     }
-    execute_one_instruction(vm, rom_array, local_prog_chunk, rom_size);
+    execute_one_instruction(vm, rom_array, local_prog_chunk, rom_size, nullptr); // No instrumentation for test kernels
 
     // 3. Write the final state back to output buffers
     for (uint i = 0; i < NB_REGS; ++i) {
@@ -1096,14 +1129,14 @@ kernel void test_execute_one_instruction(
     // We clone the state first so the original (now modified) state in the VM is not consumed
     thread Blake2bState temp_prog_digest = vm.prog_digest_state;
     thread uint8_t temp_prog_digest_hash[64];
-    blake2b_final(temp_prog_digest, temp_prog_digest_hash, 64);
+    blake2b_final(temp_prog_digest, temp_prog_digest_hash, 64, nullptr); // No instrumentation for test kernels
     for (uint i = 0; i < 64; ++i) {
         final_prog_digest_hash[i] = temp_prog_digest_hash[i];
     }
 
     thread Blake2bState temp_mem_digest = vm.mem_digest_state;
     thread uint8_t temp_mem_digest_hash[64];
-    blake2b_final(temp_mem_digest, temp_mem_digest_hash, 64);
+    blake2b_final(temp_mem_digest, temp_mem_digest_hash, 64, nullptr); // No instrumentation for test kernels
     for (uint i = 0; i < 64; ++i) {
         final_mem_digest_hash[i] = temp_mem_digest_hash[i];
     }
@@ -1126,11 +1159,11 @@ kernel void test_vm_finalize(
             local_rom_digest[i] = rom_digest_array[i];
         }
         thread VMState vm;
-        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len, nullptr); // No instrumentation for test kernels
 
         // 2. Call vm_finalize
         thread uint8_t result[64];
-        vm_finalize(vm, result);
+        vm_finalize(vm, result, nullptr); // No instrumentation for test kernels
 
         // 3. Write result to output buffer
         for (uint i = 0; i < 64; ++i) {

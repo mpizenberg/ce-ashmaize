@@ -20,6 +20,17 @@ pub struct MetalAshmaize {
 }
 
 impl MetalAshmaize {
+    /// Get the optimal storage mode for this device
+    /// Uses StorageModeShared on Apple Silicon (unified memory) for better performance
+    /// Falls back to StorageModeManaged on discrete GPUs
+    fn storage_mode(&self) -> metal::MTLResourceOptions {
+        if self.device.has_unified_memory() {
+            metal::MTLResourceOptions::StorageModeShared
+        } else {
+            metal::MTLResourceOptions::StorageModeManaged
+        }
+    }
+
     pub fn new() -> Option<Self> {
         println!("Attempting to initialize MetalAshmaize...");
 
@@ -331,21 +342,23 @@ impl MetalAshmaize {
 
         let concatenated_salts: Vec<u8> = salts.iter().flat_map(|s| *s).cloned().collect();
 
+        let storage_mode = self.storage_mode();
+
         // Input buffers
         let rom_buffer = self.device.new_buffer_with_data(
             rom.data().as_ptr() as *const c_void,
             rom.data().len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
         let rom_digest_buffer = self.device.new_buffer_with_data(
             rom.digest().0.as_ptr() as *const c_void,
             rom.digest().0.len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
         let salt_buffer = self.device.new_buffer_with_data(
             concatenated_salts.as_ptr() as *const c_void,
             concatenated_salts.len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         // Constant buffers
@@ -353,34 +366,34 @@ impl MetalAshmaize {
         let salt_len_buffer = self.device.new_buffer_with_data(
             &salt_len_data as *const u32 as *const c_void,
             std::mem::size_of_val(&salt_len_data) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         let rom_size_data = rom.original_len() as u32;
         let rom_size_buffer = self.device.new_buffer_with_data(
             &rom_size_data as *const u32 as *const c_void,
             std::mem::size_of_val(&rom_size_data) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         let nb_instrs_data = nb_instrs;
         let nb_instrs_buffer = self.device.new_buffer_with_data(
             &nb_instrs_data as *const u32 as *const c_void,
             std::mem::size_of_val(&nb_instrs_data) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         let nb_loops_data = nb_loops;
         let nb_loops_buffer = self.device.new_buffer_with_data(
             &nb_loops_data as *const u32 as *const c_void,
             std::mem::size_of_val(&nb_loops_data) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         // Output buffer for the final hashes
         let final_hash_buffer = self.device.new_buffer(
             (num_salts * 64) as u64, // 64 bytes per hash
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         // Command encoding
@@ -435,14 +448,15 @@ impl MetalAshmaize {
         &self,
         input: &[u8],
     ) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+        let storage_mode = self.storage_mode();
         let input_buffer = self.device.new_buffer_with_data(
             input.as_ptr() as *const c_void,
             input.len() as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
         let output_buffer = self.device.new_buffer(
             64, // Blake2b output is 64 bytes
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
 
         let command_buffer = self.command_queue.new_command_buffer();
@@ -455,7 +469,7 @@ impl MetalAshmaize {
         let input_len_buffer = self.device.new_buffer_with_data(
             &input_len_data as *const u32 as *const c_void,
             std::mem::size_of_val(&input_len_data) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
+            storage_mode,
         );
         compute_encoder.set_buffer(2, Some(&input_len_buffer), 0);
 

@@ -1158,6 +1158,15 @@ impl MetalAshmaize {
     }
 }
 
+impl Drop for MetalAshmaize {
+    fn drop(&mut self) {
+        eprintln!("MetalAshmaize instance dropped, ensuring Metal resources are released.");
+        // The owned Metal objects (device, command_queue, pipeline_states)
+        // will have their `drop` methods called automatically here,
+        // releasing their underlying Metal resources.
+    }
+}
+
 /// The output of a single instruction execution test on the GPU.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TestExecOneResult {

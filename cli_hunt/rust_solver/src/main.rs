@@ -3,6 +3,8 @@ use ashmaize::metal::MetalAshmaize;
 use ashmaize::rom::RomLike;
 use ashmaize::{Rom, RomGenerationType};
 use clap::Parser;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub const MB: usize = 1024 * 1024;
 pub const GB: usize = 1024 * MB;
@@ -50,6 +52,14 @@ pub fn init_rom(no_pre_mine_hex: &str) -> Rom {
 fn main() {
     let args = Args::parse();
 
+    // Set up a signal handler for graceful shutdown.
+    // This creates an atomic boolean flag that will be set to `true` when a SIGTERM or SIGINT is received.
+    let term = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))
+        .expect("Failed to register SIGTERM handler");
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))
+        .expect("Failed to register SIGINT handler");
+
     // Initialize AshMaize ROM (full version for CPU verification)
     let rom = init_rom(&args.no_pre_mine);
 
@@ -83,6 +93,12 @@ fn main() {
     let mut batch_count = 0u64;
 
     loop {
+        // Check for the termination signal at the beginning of each batch.
+        if term.load(Ordering::Relaxed) {
+            eprintln!("\nTermination signal received, shutting down gracefully...");
+            break; // Exit the loop to allow destructors to run.
+        }
+
         // Generate batch of preimages
         let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(BATCH_SIZE);
         let batch_start_nonce = current_nonce;
@@ -135,4 +151,5 @@ fn main() {
             );
         }
     }
+    eprintln!("Main loop finished. Program will now exit and release resources.");
 }

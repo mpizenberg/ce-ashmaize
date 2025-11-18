@@ -8,6 +8,7 @@ ashmaize = { path = "../../" } # This points to the root ashmaize crate
 hex = "0.4"
 clap = { version = "4.0", features = ["derive"] }
 rayon = "1.11.0"
+signal-hook = "0.3.18"
 
 [build]
 rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-s"]

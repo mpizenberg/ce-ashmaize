@@ -363,6 +363,15 @@ struct VMState {
     uint64_t cached_special2;
     bool special1_valid;
     bool special2_valid;
+
+    // DEBUG: Operation counters to identify bottlenecks
+    uint32_t debug_blake2b_calls;
+    uint32_t debug_mem_accesses;
+    uint32_t debug_special1_hits;
+    uint32_t debug_special1_misses;
+    uint32_t debug_special2_hits;
+    uint32_t debug_special2_misses;
+    uint32_t debug_instructions;
 };
 
 // VM initialization function
@@ -421,6 +430,15 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
     vm.special2_valid = false;
     vm.cached_special1 = 0;
     vm.cached_special2 = 0;
+
+    // Initialize debug counters
+    vm.debug_blake2b_calls = 0;
+    vm.debug_mem_accesses = 0;
+    vm.debug_special1_hits = 0;
+    vm.debug_special1_misses = 0;
+    vm.debug_special2_hits = 0;
+    vm.debug_special2_misses = 0;
+    vm.debug_instructions = 0;
 }
 
 
@@ -507,6 +525,9 @@ inline uint64_t special1_value64(thread VMState &vm) {
     if (!vm.special1_valid) {
         vm.cached_special1 = special_value64(vm.prog_digest_state);
         vm.special1_valid = true;
+        vm.debug_special1_misses++;  // DEBUG: Cache miss
+    } else {
+        vm.debug_special1_hits++;    // DEBUG: Cache hit
     }
     return vm.cached_special1;
 }
@@ -515,6 +536,9 @@ inline uint64_t special2_value64(thread VMState &vm) {
     if (!vm.special2_valid) {
         vm.cached_special2 = special_value64(vm.mem_digest_state);
         vm.special2_valid = true;
+        vm.debug_special2_misses++;  // DEBUG: Cache miss
+    } else {
+        vm.debug_special2_hits++;    // DEBUG: Cache hit
     }
     return vm.cached_special2;
 }
@@ -525,6 +549,8 @@ void execute_one_instruction(thread VMState &vm,
                              device const uint8_t *rom,
                              thread const uint8_t *prog_chunk,
                              uint32_t rom_size) {
+
+    vm.debug_instructions++;  // DEBUG: Count instructions executed
 
     // --- decode opcode byte into "opcode value" (0..255) ---
     uint8_t opcode_byte = prog_chunk[0];
@@ -604,6 +630,8 @@ void execute_one_instruction(thread VMState &vm,
 
     // Corresponds to Rust macro mem_access64!(vm, rom, addr)
     auto mem_access64 = [&](thread VMState &vref, device const uint8_t *rom_p, uint64_t addr) -> uint64_t {
+        vm.debug_mem_accesses++;  // DEBUG: Count ROM accesses
+
         device const uint8_t *mem = rom_at(rom, rom_size, (uint32_t)addr);
         uint8_t mem_chunk[64];
         for (uint32_t i = 0; i < 64; ++i) {
@@ -611,6 +639,7 @@ void execute_one_instruction(thread VMState &vm,
         }
         // update mem_digest_state with entire 64-byte chunk
         blake2b_update(vm.mem_digest_state, mem_chunk, 64);
+        vm.debug_blake2b_calls++;  // DEBUG: Count Blake2b operations
         // Invalidate cached special2 value since mem_digest changed
         vm.special2_valid = false;
         // increment memory_counter (wrapping)
@@ -789,6 +818,7 @@ void execute_one_instruction(thread VMState &vm,
 
     // Update program digest with this instruction/chunk
     blake2b_update(vm.prog_digest_state, prog_chunk, INSTR_SIZE);
+    vm.debug_blake2b_calls++;  // DEBUG: Count Blake2b operations
     // Invalidate cached special1 value since prog_digest changed
     vm.special1_valid = false;
 }
@@ -981,6 +1011,9 @@ kernel void ashmaize_hash(
     // program buffers (one per thread)
     device uint8_t *program_buffers [[buffer(8)]],
 
+    // DEBUG: counters output (7 uint32_t per thread)
+    device uint32_t *debug_counters [[buffer(9)]],
+
     uint id [[thread_position_in_grid]]
 ) {
     // Select the salt for the current thread
@@ -1019,6 +1052,16 @@ kernel void ashmaize_hash(
     for (uint i = 0; i < 64; ++i) {
         my_final_hash[i] = result[i];
     }
+
+    // DEBUG: Write operation counters to debug buffer
+    device uint32_t *my_debug = debug_counters + (id * 7);
+    my_debug[0] = vm.debug_blake2b_calls;
+    my_debug[1] = vm.debug_mem_accesses;
+    my_debug[2] = vm.debug_special1_hits;
+    my_debug[3] = vm.debug_special1_misses;
+    my_debug[4] = vm.debug_special2_hits;
+    my_debug[5] = vm.debug_special2_misses;
+    my_debug[6] = vm.debug_instructions;
 }
 
 kernel void test_blake2b(

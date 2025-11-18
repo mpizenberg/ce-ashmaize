@@ -405,6 +405,12 @@ impl MetalAshmaize {
             storage_mode,
         );
 
+        // DEBUG: Counters buffer - 7 uint32_t per thread
+        let debug_counters = self.device.new_buffer(
+            (7 * std::mem::size_of::<u32>() * num_salts) as u64,
+            storage_mode,
+        );
+
         // Command encoding
         let command_buffer = self.command_queue.new_command_buffer();
         let compute_encoder = command_buffer.new_compute_command_encoder();
@@ -420,6 +426,7 @@ impl MetalAshmaize {
         compute_encoder.set_buffer(6, Some(&nb_loops_buffer), 0);
         compute_encoder.set_buffer(7, Some(&final_hash_buffer), 0);
         compute_encoder.set_buffer(8, Some(&program_buffers), 0);
+        compute_encoder.set_buffer(9, Some(&debug_counters), 0);
 
         let grid_size = MTLSize {
             width: num_salts as u64,
@@ -457,6 +464,77 @@ impl MetalAshmaize {
             results.push(hash);
         }
         let readback_time = readback_start.elapsed();
+
+        // DEBUG: Read counters from debug buffer
+        #[derive(Debug, Clone)]
+        struct DebugCounters {
+            blake2b_calls: u32,
+            mem_accesses: u32,
+            special1_hits: u32,
+            special1_misses: u32,
+            special2_hits: u32,
+            special2_misses: u32,
+            instructions: u32,
+        }
+
+        let debug_ptr = debug_counters.contents() as *const u32;
+        let mut debug_data = Vec::with_capacity(num_salts);
+        for i in 0..num_salts {
+            unsafe {
+                let offset = i * 7;
+                debug_data.push(DebugCounters {
+                    blake2b_calls: *debug_ptr.add(offset),
+                    mem_accesses: *debug_ptr.add(offset + 1),
+                    special1_hits: *debug_ptr.add(offset + 2),
+                    special1_misses: *debug_ptr.add(offset + 3),
+                    special2_hits: *debug_ptr.add(offset + 4),
+                    special2_misses: *debug_ptr.add(offset + 5),
+                    instructions: *debug_ptr.add(offset + 6),
+                });
+            }
+        }
+
+        // Calculate averages
+        if !debug_data.is_empty() {
+            let avg_blake2b = debug_data.iter().map(|d| d.blake2b_calls as u64).sum::<u64>() / debug_data.len() as u64;
+            let avg_mem = debug_data.iter().map(|d| d.mem_accesses as u64).sum::<u64>() / debug_data.len() as u64;
+            let avg_special1_hits = debug_data.iter().map(|d| d.special1_hits as u64).sum::<u64>() / debug_data.len() as u64;
+            let avg_special1_misses = debug_data.iter().map(|d| d.special1_misses as u64).sum::<u64>() / debug_data.len() as u64;
+            let avg_special2_hits = debug_data.iter().map(|d| d.special2_hits as u64).sum::<u64>() / debug_data.len() as u64;
+            let avg_special2_misses = debug_data.iter().map(|d| d.special2_misses as u64).sum::<u64>() / debug_data.len() as u64;
+            let avg_instructions = debug_data.iter().map(|d| d.instructions as u64).sum::<u64>() / debug_data.len() as u64;
+
+            let total_special1 = avg_special1_hits + avg_special1_misses;
+            let special1_hit_rate = if total_special1 > 0 {
+                (avg_special1_hits as f64 / total_special1 as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let total_special2 = avg_special2_hits + avg_special2_misses;
+            let special2_hit_rate = if total_special2 > 0 {
+                (avg_special2_hits as f64 / total_special2 as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            println!("\n=== GPU KERNEL PROFILING (Average per hash) ===");
+            println!("Blake2b calls:       {} operations", avg_blake2b);
+            println!("Memory accesses:     {} ROM reads", avg_mem);
+            println!("Instructions:        {} executed", avg_instructions);
+            println!("\nCache Performance:");
+            println!("  Special1 hits:     {} ({:.1}% hit rate)", avg_special1_hits, special1_hit_rate);
+            println!("  Special1 misses:   {}", avg_special1_misses);
+            println!("  Special2 hits:     {} ({:.1}% hit rate)", avg_special2_hits, special2_hit_rate);
+            println!("  Special2 misses:   {}", avg_special2_misses);
+            println!("\nEstimated Time Breakdown (rough approximation):");
+            println!("  Blake2b:     ~{:.1}% of time ({} calls @ ~0.5μs each)",
+                (avg_blake2b as f64 / (avg_blake2b + avg_mem + avg_instructions) as f64) * 100.0, avg_blake2b);
+            println!("  Memory:      ~{:.1}% of time ({} accesses @ ~0.2μs each)",
+                (avg_mem as f64 / (avg_blake2b + avg_mem + avg_instructions) as f64) * 100.0, avg_mem);
+            println!("  Other:       ~{:.1}% of time\n",
+                (avg_instructions as f64 / (avg_blake2b + avg_mem + avg_instructions) as f64) * 100.0);
+        }
 
         Ok((results, buffer_time, gpu_time, readback_time))
     }
@@ -1365,6 +1443,110 @@ mod tests {
         println!("If speedup is < 10x: GPU has fundamental efficiency problem");
         println!("If speedup is < 2x: GPU is barely working or has massive overhead");
         println!("If GPU is SLOWER: Something is very wrong\n");
+    }
+
+    #[test]
+    fn profile_gpu_single() {
+        use std::time::{Duration, Instant};
+
+        let metal = MetalAshmaize::new().expect("Failed to initialize Metal");
+        let rom = Rom::new(
+            b"profile",
+            RomGenerationType::TwoStep {
+                pre_size: 16 * 1024,
+                mixing_numbers: 4,
+            },
+            1024 * 1024, // 1MB ROM
+        );
+
+        // Warm up GPU - get everything initialized
+        println!("Warming up GPU...");
+        for _ in 0..5 {
+            let _ = metal.hash(&[b"warmup"], &rom, 8, 256);
+        }
+
+        println!("\n=== READY TO PROFILE ===");
+        println!("You have 5 seconds to start Instruments recording...");
+        println!("1. Open Instruments.app");
+        println!("2. Choose 'Metal System Trace' template");
+        println!("3. Select this process (cargo test)");
+        println!("4. Click Record button");
+        std::thread::sleep(Duration::from_secs(5));
+
+        println!("\n▶ PROFILING WINDOW STARTED - Recording for 10 seconds");
+        let start = Instant::now();
+        let mut iterations = 0;
+
+        // Run for 10 seconds to get good profiling data
+        while start.elapsed() < Duration::from_secs(10) {
+            let _ = metal.hash(&[b"salt"], &rom, 8, 256);
+            iterations += 1;
+        }
+
+        let elapsed = start.elapsed();
+        println!("■ PROFILING WINDOW ENDED");
+        println!("Completed {} iterations in {:?}", iterations, elapsed);
+        println!("Average time per hash: {:.2} ms", elapsed.as_secs_f64() * 1000.0 / iterations as f64);
+
+        println!("\nYou can stop Instruments recording now.");
+        println!("Keeping process alive for 3 seconds to capture final data...");
+        std::thread::sleep(Duration::from_secs(3));
+    }
+
+    #[test]
+    fn profile_gpu_batch() {
+        use std::time::{Duration, Instant};
+
+        let metal = MetalAshmaize::new().expect("Failed to initialize Metal");
+        let rom = Rom::new(
+            b"profile_batch",
+            RomGenerationType::TwoStep {
+                pre_size: 16 * 1024,
+                mixing_numbers: 4,
+            },
+            1024 * 1024, // 1MB ROM
+        );
+
+        // Prepare batch of 1000 salts
+        let salts: Vec<Vec<u8>> = (0..1000)
+            .map(|i| format!("salt_{:04}", i).into_bytes())
+            .collect();
+        let max_len = salts.iter().map(|s| s.len()).max().unwrap();
+        let padded: Vec<Vec<u8>> = salts
+            .into_iter()
+            .map(|mut s| {
+                s.resize(max_len, 0);
+                s
+            })
+            .collect();
+        let refs: Vec<&[u8]> = padded.iter().map(|s| s.as_slice()).collect();
+
+        // Warm up
+        println!("Warming up GPU...");
+        let _ = metal.hash(&refs, &rom, 8, 256);
+
+        println!("\n=== READY TO PROFILE (BATCH MODE) ===");
+        println!("You have 5 seconds to start Instruments recording...");
+        println!("This will run 1000 parallel hashes repeatedly");
+        std::thread::sleep(Duration::from_secs(5));
+
+        println!("\n▶ PROFILING WINDOW STARTED - Recording for 10 seconds");
+        let start = Instant::now();
+        let mut iterations = 0;
+
+        while start.elapsed() < Duration::from_secs(10) {
+            let _ = metal.hash(&refs, &rom, 8, 256);
+            iterations += 1;
+        }
+
+        let elapsed = start.elapsed();
+        println!("■ PROFILING WINDOW ENDED");
+        println!("Completed {} batch iterations in {:?}", iterations, elapsed);
+        println!("Total hashes: {}", iterations * 1000);
+        println!("Average time per batch: {:.2} ms", elapsed.as_secs_f64() * 1000.0 / iterations as f64);
+
+        println!("\nYou can stop Instruments recording now.");
+        std::thread::sleep(Duration::from_secs(3));
     }
 
     #[test]

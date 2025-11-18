@@ -22,7 +22,7 @@ Now you can use the [`hash`] function to execute a random program against
 the [`Rom`] that will generate a Digest.
 
 ```
-use ashmaize::hash;
+use ashmaize::original::hash;
 # use ashmaize::{Rom, RomGenerationType};
 # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * 1_024);
 
@@ -435,7 +435,7 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
 /// # Example
 ///
 /// ```
-/// # use ashmaize::{Rom, RomGenerationType, hash};
+/// # use ashmaize::{Rom, RomGenerationType, original::hash};
 /// # const KB: usize = 1_024;
 /// # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * KB);
 /// const NB_LOOPS: u32 = 8;

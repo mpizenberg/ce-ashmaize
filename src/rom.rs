@@ -5,6 +5,7 @@ use cryptoxide::{
 
 pub const DATASET_ACCESS_SIZE: usize = 64;
 
+#[derive(Clone, Copy)]
 pub struct RomDigest(pub(crate) [u8; 64]);
 
 /// The **R**ead **O**only **M**emory used to generate the proram.
@@ -17,6 +18,54 @@ pub struct RomDigest(pub(crate) [u8; 64]);
 pub struct Rom {
     pub digest: RomDigest,
     pub data: Vec<u8>,
+}
+
+/// A memory-optimized ROM structure for hashing.
+pub struct LightRom {
+    pub digest: RomDigest,
+    pub data: Vec<u8>,
+    original_len: usize,
+}
+
+/// A trait for abstracting over different ROM implementations.
+pub trait RomLike {
+    fn at(&self, i: u32) -> &[u8; DATASET_ACCESS_SIZE];
+    fn digest(&self) -> &RomDigest;
+    fn data(&self) -> &[u8];
+    fn original_len(&self) -> usize;
+}
+
+impl RomLike for Rom {
+    fn at(&self, i: u32) -> &[u8; DATASET_ACCESS_SIZE] {
+        self.at(i)
+    }
+    fn digest(&self) -> &RomDigest {
+        &self.digest
+    }
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+    fn original_len(&self) -> usize {
+        self.data.len()
+    }
+}
+
+impl RomLike for LightRom {
+    fn at(&self, i: u32) -> &[u8; DATASET_ACCESS_SIZE] {
+        let num_blocks = self.original_len / DATASET_ACCESS_SIZE;
+        let start = i as usize % num_blocks;
+        <&[u8; DATASET_ACCESS_SIZE]>::try_from(&self.data[start..start + DATASET_ACCESS_SIZE])
+            .unwrap()
+    }
+    fn digest(&self) -> &RomDigest {
+        &self.digest
+    }
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+    fn original_len(&self) -> usize {
+        self.original_len
+    }
 }
 
 /// The generation type of the **ROM**.
@@ -89,6 +138,19 @@ impl Rom {
         let start = i as usize % (self.data.len() / DATASET_ACCESS_SIZE);
         <&[u8; DATASET_ACCESS_SIZE]>::try_from(&self.data[start..start + DATASET_ACCESS_SIZE])
             .unwrap()
+    }
+
+    /// Creates a memory-optimized version of the ROM.
+    pub fn shrink(&self) -> LightRom {
+        let active_len = self.data.len() / DATASET_ACCESS_SIZE + (DATASET_ACCESS_SIZE - 1);
+        let mut active_data = Vec::with_capacity(active_len);
+        active_data.extend_from_slice(&self.data[..active_len]);
+
+        LightRom {
+            digest: self.digest,
+            data: active_data,
+            original_len: self.data.len(),
+        }
     }
 }
 

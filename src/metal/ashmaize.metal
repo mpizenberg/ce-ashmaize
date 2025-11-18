@@ -490,13 +490,6 @@ void execute_one_instruction(thread VMState &vm,
     // --- decode r1, r2, r3 from bytes 2..3 (u16 big-endian in rust) ---
     // rust: let rs = ((instruction[2] as u16) << 8) | (instruction[3] as u16);
     uint16_t rs = ((uint16_t)prog_chunk[2] << 8) | (uint16_t)prog_chunk[3];
-
-    // The Rust code references REGS_BITS and REGS_INDEX_MASK (defined elsewhere).
-    // We assume those constants exist in C/Metal translation scope too. If not, replace with actual values.
-    // We'll use the same symbol names here so your build-time constants can supply them.
-    const uint32_t REGS_BITS = REGS_BITS;           // must be provided in compile unit
-    const uint32_t REGS_INDEX_MASK = REGS_INDEX_MASK; // must be provided
-
     uint8_t r1 = (uint8_t)(((rs >> (2 * REGS_BITS)) & REGS_INDEX_MASK));
     uint8_t r2 = (uint8_t)(((rs >> REGS_BITS) & REGS_INDEX_MASK));
     uint8_t r3 = (uint8_t)((rs) & REGS_INDEX_MASK);
@@ -790,8 +783,13 @@ void execute_program(thread VMState &vm, device const uint8_t *rom,
 
     // Execute instructions for this specific thread
     for (uint32_t i = 0; i < nb_instrs; i++) {
-        execute_one_instruction(vm, rom, &program_buffer[vm.ip], rom_size);
-        vm.ip++;
+        // Calculate the actual byte offset into the program_buffer with wrapping
+        // This replicates Rust's Program::at(vm.ip) behavior
+        uint32_t current_program_instruction_index = vm.ip % nb_instrs; // vm.ip is global, nb_instrs is the program length
+        uint32_t byte_offset = current_program_instruction_index * INSTR_SIZE;
+
+        execute_one_instruction(vm, rom, &program_buffer[byte_offset], rom_size);
+        vm.ip++; // Increment global instruction pointer
     }
 
     // Post instructions
@@ -839,53 +837,50 @@ void vm_finalize(thread VMState &vm, thread uint8_t *result) {
 // Main compute kernel
 kernel void ashmaize_hash(
     device const uint8_t *rom_array [[buffer(0)]],
-    device uint8_t *results_array [[buffer(1)]],
+    device const uint8_t *rom_digest_array [[buffer(1)]],
     device const uint8_t *salt_array [[buffer(2)]],
-    device const uint8_t *rom_digest_array [[buffer(3)]],
-    device uint8_t *programs_array [[buffer(4)]], // Programs array is now mutable (input/output)
-    device const uint8_t *initial_prog_seeds_array [[buffer(5)]], // New buffer for initial prog_seeds // TODO: remove
-    constant uint32_t &rom_size [[buffer(6)]],
-    constant uint32_t &nb_loops [[buffer(7)]],
-    constant uint32_t &nb_instrs [[buffer(8)]],
-    constant uint32_t &program_size [[buffer(9)]], // New buffer for program_size
+    constant uint32_t &salt_len [[buffer(3)]],
+    constant uint32_t &rom_size [[buffer(4)]],
+    constant uint32_t &nb_instrs [[buffer(5)]],
+    constant uint32_t &nb_loops [[buffer(6)]],
+
+    // outputs
+    device uint8_t *final_hash [[buffer(7)]],
     uint id [[thread_position_in_grid]]
 ) {
-    // Local copies of data to work in thread address space
-    uint8_t local_rom_digest[64];
-    for (int i = 0; i < 64; i++) {
+    // Select the salt for the current thread
+    device const uint8_t *my_salt = salt_array + (id * salt_len);
+
+    // Initialize the VM with given ROM digest and salt
+    uint32_t rom_digest_len = 64;
+    thread uint8_t local_rom_digest[64];
+    for (uint i = 0; i < rom_digest_len; ++i) {
         local_rom_digest[i] = rom_digest_array[i];
     }
-
-    // Initialize VM for this thread using local data
     VMState vm;
-    // TODO: the salt_array and salt_len handling is wrong here
-    uint32_t salt_len = 32;  // Assuming 32-byte salts
-    vm_init(vm, local_rom_digest, 64, salt_array, salt_len);
+    vm_init(vm, local_rom_digest, rom_digest_len, my_salt, salt_len);
 
-    // Each thread gets its own mutable program buffer segment from the device buffer.
-    // It is copied to thread-local memory for shuffling and execution.
     // Max program size: 256 instructions * 20 bytes/instr = 5120 bytes.
-    // This should fit in thread-local memory (check device limits if issues).
     thread uint8_t local_program_buffer[5120];
 
-    // Copy initial (template) program into thread-local buffer.
-    // The `programs_array` in `mod.rs` is initialized with repeated template programs.
-    // So, each thread copies its own segment from this buffer.
-    device const uint8_t *initial_program_segment = &programs_array[id * program_size];
-    for (uint32_t i = 0; i < program_size; i++) {
-        local_program_buffer[i] = initial_program_segment[i];
+    // Initialize program with zeros (as is done in VM::new)
+    for (uint32_t i = 0; i < nb_instrs * INSTR_SIZE; i++) {
+        local_program_buffer[i] = 0;
     }
 
     // Execute the hash computation
     for (uint32_t loop = 0; loop < nb_loops; loop++) {
-        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, program_size);
+        execute_program(vm, rom_array, local_program_buffer, rom_size, nb_instrs, 5120);
     }
 
-    // Finalize and store result
-    uint8_t result[64];
+    // Finalize the result and write to output buffer
+    thread uint8_t result[64];
     vm_finalize(vm, result);
-    for (int i = 0; i < 64; ++i) {
-        results_array[id * 64 + i] = result[i];
+
+    // Select the output location for the current thread
+    device uint8_t *my_final_hash = final_hash + (id * 64);
+    for (uint i = 0; i < 64; ++i) {
+        my_final_hash[i] = result[i];
     }
 }
 
@@ -1048,6 +1043,97 @@ kernel void test_execute_program(
         // Copy modified registers back to output buffer
         for (uint i = 0; i < NB_REGS; ++i) {
             output_regs[i] = vm.regs[i];
+        }
+    }
+}
+
+// --- Test Kernel for execute_one_instruction ---
+
+// This kernel is designed for unit testing the `execute_one_instruction` function.
+// It takes initial VM state components, including seeds for the digests,
+// executes one instruction, and writes the final state back for comparison.
+kernel void test_execute_one_instruction(
+    // Inputs
+    device const uint8_t *rom_array [[buffer(0)]],
+    device const uint8_t *rom_digest_array [[buffer(1)]],
+    device const uint8_t *salt_array [[buffer(2)]],
+    constant uint32_t &salt_len [[buffer(3)]],
+    constant uint32_t &rom_size [[buffer(4)]],
+    constant uint32_t &nb_instrs [[buffer(5)]],
+    device const uint8_t* prog_chunk [[buffer(6)]],
+
+    // Outputs
+    device uint64_t* final_regs [[buffer(7)]],
+    device uint32_t* final_counters [[buffer(8)]], // ip, memory_counter
+    device uint8_t* final_prog_digest_hash [[buffer(9)]],
+    device uint8_t* final_mem_digest_hash [[buffer(10)]]
+) {
+    // 1. Reconstruct the initial VMState in thread memory
+    uint32_t rom_digest_len = 64;
+    thread uint8_t local_rom_digest[64];
+    for (uint i = 0; i < rom_digest_len; ++i) {
+        local_rom_digest[i] = rom_digest_array[i];
+    }
+    thread VMState vm;
+    vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+
+    // 2. Execute the single instruction
+    thread uint8_t local_prog_chunk[20];
+    for (uint i = 0; i < 20; ++i) {
+        local_prog_chunk[i] = prog_chunk[i];
+    }
+    execute_one_instruction(vm, rom_array, local_prog_chunk, rom_size);
+
+    // 3. Write the final state back to output buffers
+    for (uint i = 0; i < NB_REGS; ++i) {
+        final_regs[i] = vm.regs[i];
+    }
+    final_counters[0] = vm.ip;
+    final_counters[1] = vm.memory_counter;
+
+    // 4. Finalize the digests and write their hashes to the output
+    // We clone the state first so the original (now modified) state in the VM is not consumed
+    thread Blake2bState temp_prog_digest = vm.prog_digest_state;
+    thread uint8_t temp_prog_digest_hash[64];
+    blake2b_final(temp_prog_digest, temp_prog_digest_hash, 64);
+    for (uint i = 0; i < 64; ++i) {
+        final_prog_digest_hash[i] = temp_prog_digest_hash[i];
+    }
+
+    thread Blake2bState temp_mem_digest = vm.mem_digest_state;
+    thread uint8_t temp_mem_digest_hash[64];
+    blake2b_final(temp_mem_digest, temp_mem_digest_hash, 64);
+    for (uint i = 0; i < 64; ++i) {
+        final_mem_digest_hash[i] = temp_mem_digest_hash[i];
+    }
+}
+
+kernel void test_vm_finalize(
+    // Inputs to initialize VM
+    device const uint8_t *rom_digest_array [[buffer(0)]],
+    device const uint8_t *salt_array [[buffer(1)]],
+    constant uint32_t &salt_len [[buffer(2)]],
+    // Output
+    device uint8_t *final_hash [[buffer(3)]],
+    uint id [[thread_position_in_grid]]
+) {
+    if (id == 0) {
+        // 1. Initialize VM state
+        uint32_t rom_digest_len = 64;
+        thread uint8_t local_rom_digest[64];
+        for (uint i = 0; i < rom_digest_len; ++i) {
+            local_rom_digest[i] = rom_digest_array[i];
+        }
+        thread VMState vm;
+        vm_init(vm, local_rom_digest, rom_digest_len, salt_array, salt_len);
+
+        // 2. Call vm_finalize
+        thread uint8_t result[64];
+        vm_finalize(vm, result);
+
+        // 3. Write result to output buffer
+        for (uint i = 0; i < 64; ++i) {
+            final_hash[i] = result[i];
         }
     }
 }

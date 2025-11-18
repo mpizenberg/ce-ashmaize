@@ -1,8 +1,7 @@
 //! GPU-accelerated Ashmaize hash implementation using Metal
 //! This module provides GPU acceleration for the Ashmaize hash algorithm for Apple Silicon
 
-use crate::b2::VM;
-use crate::rom::{Rom, RomDigest};
+use crate::rom::Rom;
 use metal::{CommandQueue, ComputePipelineState, Device, MTLSize};
 use std::ffi::c_void;
 use std::ptr;
@@ -16,6 +15,8 @@ pub struct MetalAshmaize {
     post_instructions_pipeline_state: ComputePipelineState, // Added for post_instructions test kernel
     vm_init_pipeline_state: ComputePipelineState,           // Added for vm_init test kernel
     execute_program_pipeline_state: ComputePipelineState, // Added for execute_one_instruction test kernel
+    execute_one_instruction_pipeline_state: ComputePipelineState,
+    finalize_pipeline_state: ComputePipelineState,
 }
 
 impl MetalAshmaize {
@@ -228,6 +229,73 @@ impl MetalAshmaize {
         };
         // ---------------------------
 
+        // --- NEW CODE FOR EXECUTE_ONE_INSTRUCTION TEST KERNEL ---
+        let execute_one_instruction_kernel_function = match library
+            .get_function("test_execute_one_instruction", None)
+        {
+            Ok(func) => {
+                println!("Successfully retrieved kernel function 'test_execute_one_instruction'");
+                func
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to get function 'test_execute_one_instruction' from library: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        let execute_one_instruction_pipeline_state = match device
+            .new_compute_pipeline_state_with_function(&execute_one_instruction_kernel_function)
+        {
+            Ok(state) => {
+                println!(
+                    "Successfully created compute pipeline state for test_execute_one_instruction"
+                );
+                state
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to create compute pipeline state for test_execute_one_instruction: {}",
+                    e
+                );
+                return None;
+            }
+        };
+        // ---------------------------
+
+        // --- NEW CODE FOR FINALIZE TEST KERNEL ---
+        let finalize_kernel_function = match library.get_function("test_vm_finalize", None) {
+            Ok(func) => {
+                println!("Successfully retrieved kernel function 'test_vm_finalize'");
+                func
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to get function 'test_vm_finalize' from library: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        let finalize_pipeline_state =
+            match device.new_compute_pipeline_state_with_function(&finalize_kernel_function) {
+                Ok(state) => {
+                    println!("Successfully created compute pipeline state for test_vm_finalize");
+                    state
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Failed to create compute pipeline state for test_vm_finalize: {}",
+                        e
+                    );
+                    return None;
+                }
+            };
+        // ---------------------------
+
         println!("MetalAshmaize initialized successfully");
         Some(Self {
             device,
@@ -238,174 +306,126 @@ impl MetalAshmaize {
             post_instructions_pipeline_state,
             vm_init_pipeline_state,
             execute_program_pipeline_state,
+            execute_one_instruction_pipeline_state,
+            finalize_pipeline_state,
         })
     }
 
-    pub fn hash_parallel(
+    pub fn hash<R: crate::rom::RomLike>(
         &self,
         salts: &[&[u8]],
-        rom: &Rom,
+        rom: &R,
         nb_loops: u32,
         nb_instrs: u32,
     ) -> Result<Vec<[u8; 64]>, Box<dyn std::error::Error>> {
-        let num_hashes = salts.len();
-        let program_size = nb_instrs as usize * crate::b2::INSTR_SIZE;
-
-        // Prepare ROM data
-        let rom_data = &rom.data;
-        let rom_digest = &rom.digest.0;
-
-        // Collect initial prog_seed for each salt. The Metal kernel will use this to
-        // initialize its own `prog_seed` and shuffle the program for the first loop.
-        let mut initial_prog_seeds = Vec::new();
-        for salt in salts {
-            let vm = VM::new(&RomDigest(*rom_digest), nb_instrs, salt);
-            initial_prog_seeds.extend_from_slice(&vm.prog_seed);
+        if salts.is_empty() {
+            return Ok(Vec::new());
         }
 
-        // Create a template program (all zeros) to be shuffled on the GPU.
-        // The instructions in this buffer are irrelevant, as they will be
-        // overwritten by the shuffled program data computed by hprime on GPU.
-        let template_program = crate::b2::Program::new(nb_instrs);
-        let template_program_bytes = template_program.get_instructions();
-
-        // Prepare salt data (pad each to 32 bytes)
-        let mut all_salts = Vec::new();
-        for salt in salts {
-            let mut padded_salt = vec![0u8; 32];
-            let len = std::cmp::min(salt.len(), 32);
-            padded_salt[..len].copy_from_slice(&salt[..len]);
-            all_salts.extend_from_slice(&padded_salt);
+        let num_salts = salts.len();
+        let salt_len = salts[0].len();
+        // For simplicity, kernel will assume all salts have the same length.
+        if salts.iter().any(|s| s.len() != salt_len) {
+            return Err("All salts must have the same length for GPU hashing.".into());
         }
 
-        // Create buffers
+        let concatenated_salts: Vec<u8> = salts.iter().flat_map(|s| *s).cloned().collect();
+
+        // Input buffers
         let rom_buffer = self.device.new_buffer_with_data(
-            rom_data.as_ptr() as *const c_void,
-            rom_data.len() as u64,
+            rom.data().as_ptr() as *const c_void,
+            rom.data().len() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
-
         let rom_digest_buffer = self.device.new_buffer_with_data(
-            rom_digest.as_ptr() as *const c_void,
-            rom_digest.len() as u64,
+            rom.digest().0.as_ptr() as *const c_void,
+            rom.digest().0.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let salt_buffer = self.device.new_buffer_with_data(
+            concatenated_salts.as_ptr() as *const c_void,
+            concatenated_salts.len() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
 
-        let salts_buffer = self.device.new_buffer_with_data(
-            all_salts.as_ptr() as *const c_void,
-            all_salts.len() as u64,
+        // Constant buffers
+        let salt_len_data = salt_len as u32;
+        let salt_len_buffer = self.device.new_buffer_with_data(
+            &salt_len_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&salt_len_data) as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
 
-        // Buffer for initial prog_seeds
-        let initial_prog_seeds_buffer = self.device.new_buffer_with_data(
-            initial_prog_seeds.as_ptr() as *const c_void,
-            initial_prog_seeds.len() as u64,
+        let rom_size_data = rom.original_len() as u32;
+        let rom_size_buffer = self.device.new_buffer_with_data(
+            &rom_size_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&rom_size_data) as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
 
-        // Pass the template program to GPU, it will be shuffled per thread.
-        // Each thread will need its own mutable program buffer. This buffer
-        // will be an input/output buffer for the kernel.
-        let programs_buffer_size = (num_hashes * program_size) as u64;
-        let programs_buffer = self.device.new_buffer(
-            programs_buffer_size,
-            metal::MTLResourceOptions::StorageModeManaged,
-        );
-        // Initialize programs_buffer with the template program (all zeros) replicated for each thread
-        unsafe {
-            let ptr = programs_buffer.contents() as *mut u8;
-            for i in 0..num_hashes {
-                ptr::copy_nonoverlapping(
-                    template_program_bytes.as_ptr(),
-                    ptr.add(i * program_size),
-                    program_size,
-                );
-            }
-        }
-
-        let results_buffer = self.device.new_buffer(
-            (num_hashes * 64) as u64,
+        let nb_instrs_data = nb_instrs;
+        let nb_instrs_buffer = self.device.new_buffer_with_data(
+            &nb_instrs_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&nb_instrs_data) as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
 
-        // Create command buffer
+        let nb_loops_data = nb_loops;
+        let nb_loops_buffer = self.device.new_buffer_with_data(
+            &nb_loops_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&nb_loops_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        // Output buffer for the final hashes
+        let final_hash_buffer = self.device.new_buffer(
+            (num_salts * 64) as u64, // 64 bytes per hash
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        // Command encoding
         let command_buffer = self.command_queue.new_command_buffer();
         let compute_encoder = command_buffer.new_compute_command_encoder();
 
-        // Set buffers
-        compute_encoder.set_buffer(0, Some(&rom_buffer), 0); // ROM array
-        compute_encoder.set_buffer(1, Some(&results_buffer), 0); // Results array
-        compute_encoder.set_buffer(2, Some(&salts_buffer), 0); // Salts array
-        compute_encoder.set_buffer(3, Some(&rom_digest_buffer), 0); // ROM digest array
-        compute_encoder.set_buffer(4, Some(&programs_buffer), 0); // Programs array (mutable, per-thread)
-        compute_encoder.set_buffer(5, Some(&initial_prog_seeds_buffer), 0); // Initial prog_seeds for each thread
-
-        // Create parameter buffer
-        let params_data = [
-            rom_data.len() as u32, // ROM size at offset 0
-            nb_loops,              // nb_loops at offset 4
-            nb_instrs,             // nb_instrs at offset 8
-            program_size as u32,   // program_size at offset 12
-        ];
-        let params_buffer = self.device.new_buffer_with_data(
-            params_data.as_ptr() as *const c_void,
-            std::mem::size_of_val(&params_data) as u64,
-            metal::MTLResourceOptions::StorageModeManaged,
-        );
-
-        compute_encoder.set_buffer(6, Some(&params_buffer), 0); // ROM size
-        compute_encoder.set_buffer(7, Some(&params_buffer), std::mem::size_of::<u32>() as u64); // nb_loops
-        compute_encoder.set_buffer(
-            8,
-            Some(&params_buffer),
-            (2 * std::mem::size_of::<u32>()) as u64,
-        ); // nb_instrs
-        compute_encoder.set_buffer(
-            9,
-            Some(&params_buffer),
-            (3 * std::mem::size_of::<u32>()) as u64,
-        ); // program_size
-
-        // Configure thread groups
-        let max_threads_per_group = self.pipeline_state.max_total_threads_per_threadgroup();
-        let threads_per_threadgroup = std::cmp::min(256, max_threads_per_group) as u64; // Use up to 256 threads per group
-
-        // Calculate how many thread groups we need
-        let num_thread_groups =
-            (num_hashes as u64 + threads_per_threadgroup - 1) / threads_per_threadgroup;
-
-        let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
-            height: 1,
-            depth: 1,
-        };
-
-        let threadgroups = MTLSize {
-            width: num_thread_groups,
-            height: 1,
-            depth: 1,
-        };
-
-        // Dispatch compute kernel
         compute_encoder.set_compute_pipeline_state(&self.pipeline_state);
-        compute_encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+
+        compute_encoder.set_buffer(0, Some(&rom_buffer), 0);
+        compute_encoder.set_buffer(1, Some(&rom_digest_buffer), 0);
+        compute_encoder.set_buffer(2, Some(&salt_buffer), 0);
+        compute_encoder.set_buffer(3, Some(&salt_len_buffer), 0);
+        compute_encoder.set_buffer(4, Some(&rom_size_buffer), 0);
+        compute_encoder.set_buffer(5, Some(&nb_instrs_buffer), 0);
+        compute_encoder.set_buffer(6, Some(&nb_loops_buffer), 0);
+        compute_encoder.set_buffer(7, Some(&final_hash_buffer), 0);
+
+        let grid_size = MTLSize {
+            width: num_salts as u64,
+            height: 1,
+            depth: 1,
+        };
+
+        let threadgroup_width = self.pipeline_state.max_total_threads_per_threadgroup();
+        let threadgroup_size = MTLSize {
+            width: threadgroup_width.min(num_salts as u64),
+            height: 1,
+            depth: 1,
+        };
+
+        compute_encoder.dispatch_threads(grid_size, threadgroup_size);
         compute_encoder.end_encoding();
 
-        // Commit and wait
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
-        // Read results
-        let results_ptr = results_buffer.contents() as *const u8;
-        let mut results = Vec::new();
-
-        unsafe {
-            for i in 0..num_hashes {
-                let mut result = [0u8; 64];
-                ptr::copy_nonoverlapping(results_ptr.add(i * 64), result.as_mut_ptr(), 64);
-                results.push(result);
+        // Read the result
+        let mut results = Vec::with_capacity(num_salts);
+        let result_ptr = final_hash_buffer.contents() as *const u8;
+        for i in 0..num_salts {
+            let mut hash = [0u8; 64];
+            unsafe {
+                ptr::copy_nonoverlapping(result_ptr.add(i * 64), hash.as_mut_ptr(), 64);
             }
+            results.push(hash);
         }
 
         Ok(results)
@@ -771,17 +791,17 @@ impl MetalAshmaize {
     }
 
     /// Tests the `execute_program` logic on the GPU
-    pub fn test_execute_program_kernel(
+    pub fn test_execute_program_kernel<R: crate::rom::RomLike>(
         &self,
-        rom: &Rom,
+        rom: &R,
         rom_digest: &[u8; 64],
         salt: &[u8],
         nb_instrs: u32,
     ) -> Result<[u64; crate::b2::NB_REGS], Box<dyn std::error::Error>> {
         // Input buffers
         let rom_buffer = self.device.new_buffer_with_data(
-            rom.data.as_ptr() as *const c_void,
-            rom.data.len() as u64,
+            rom.data().as_ptr() as *const c_void,
+            rom.data().len() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
         );
         let rom_digest_buffer = self.device.new_buffer_with_data(
@@ -802,7 +822,7 @@ impl MetalAshmaize {
             metal::MTLResourceOptions::StorageModeManaged,
         );
 
-        let rom_size_data = rom.data.len() as u32;
+        let rom_size_data = rom.original_len() as u32;
         let rom_size_buffer = self.device.new_buffer_with_data(
             &rom_size_data as *const u32 as *const c_void,
             std::mem::size_of_val(&rom_size_data) as u64,
@@ -864,95 +884,259 @@ impl MetalAshmaize {
 
         Ok(final_regs)
     }
-}
 
-// Helper function to hash on GPU with fallback to CPU
-pub fn hash_gpu_or_cpu(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
-    match MetalAshmaize::new() {
-        Some(metal_ashmaize) => {
-            metal_ashmaize
-                .hash_parallel(&[salt], rom, nb_loops, nb_instrs)
-                .unwrap()
-                .into_iter()
-                .next()
-                .unwrap()
-            // match metal_ashmaize.hash_parallel(&[salt], rom, nb_loops, nb_instrs) {
-            //     Ok(results) => results.into_iter().next().unwrap_or_else(|| {
-            //         // Fallback to CPU implementation if GPU fails
-            //         crate::b2::hash(salt, rom, nb_loops, nb_instrs)
-            //     }),
-            //     Err(_) => {
-            //         // Fallback to CPU implementation
-            //         crate::b2::hash(salt, rom, nb_loops, nb_instrs)
-            //     }
-            // }
+    pub fn test_execute_one_instruction(
+        &self,
+        rom: &Rom,
+        rom_digest: &[u8; 64],
+        salt: &[u8],
+        nb_instrs: u32,
+        prog_chunk: &[u8; 20],
+    ) -> Result<TestExecOneResult, Box<dyn std::error::Error>> {
+        // Input buffers
+        let rom_buffer = self.device.new_buffer_with_data(
+            rom.data.as_ptr() as *const c_void,
+            rom.data.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let rom_digest_buffer = self.device.new_buffer_with_data(
+            rom_digest.as_ptr() as *const c_void,
+            rom_digest.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let salt_buffer = self.device.new_buffer_with_data(
+            salt.as_ptr() as *const c_void,
+            salt.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let salt_len_data = salt.len() as u32;
+        let salt_len_buffer = self.device.new_buffer_with_data(
+            &salt_len_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&salt_len_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let rom_size_data = rom.data.len() as u32;
+        let rom_size_buffer = self.device.new_buffer_with_data(
+            &rom_size_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&rom_size_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let nb_instrs_data = nb_instrs;
+        let nb_instrs_buffer = self.device.new_buffer_with_data(
+            &nb_instrs_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&nb_instrs_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let prog_chunk_buffer = self.device.new_buffer_with_data(
+            prog_chunk.as_ptr() as *const c_void,
+            20,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        // Output buffers
+        let final_regs_buffer = self.device.new_buffer(
+            (32 * 8) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let final_counters_buffer = self.device.new_buffer(
+            (2 * 4) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+        let final_prog_digest_hash_buffer = self
+            .device
+            .new_buffer(64, metal::MTLResourceOptions::StorageModeManaged);
+        let final_mem_digest_hash_buffer = self
+            .device
+            .new_buffer(64, metal::MTLResourceOptions::StorageModeManaged);
+
+        // Command submission
+        let command_buffer = self.command_queue.new_command_buffer();
+        let compute_encoder = command_buffer.new_compute_command_encoder();
+
+        compute_encoder.set_compute_pipeline_state(&self.execute_one_instruction_pipeline_state);
+
+        // input buffers
+        compute_encoder.set_buffer(0, Some(&rom_buffer), 0); // ROM array
+        compute_encoder.set_buffer(1, Some(&rom_digest_buffer), 0); // ROM digest array
+        compute_encoder.set_buffer(2, Some(&salt_buffer), 0); // Salt array
+        compute_encoder.set_buffer(3, Some(&salt_len_buffer), 0); // Salt length
+        compute_encoder.set_buffer(4, Some(&rom_size_buffer), 0); // ROM size
+        compute_encoder.set_buffer(5, Some(&nb_instrs_buffer), 0); // Number of instructions
+        compute_encoder.set_buffer(6, Some(&prog_chunk_buffer), 0);
+        // output buffers
+        compute_encoder.set_buffer(7, Some(&final_regs_buffer), 0);
+        compute_encoder.set_buffer(8, Some(&final_counters_buffer), 0);
+        compute_encoder.set_buffer(9, Some(&final_prog_digest_hash_buffer), 0);
+        compute_encoder.set_buffer(10, Some(&final_mem_digest_hash_buffer), 0);
+
+        // Dispatch a single thread
+        compute_encoder.dispatch_thread_groups(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        compute_encoder.end_encoding();
+
+        // Commit and wait
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Read results
+        let mut final_regs = [0u64; 32];
+        let mut final_counters = [0u32; 2];
+        let mut final_prog_digest_hash = [0u8; 64];
+        let mut final_mem_digest_hash = [0u8; 64];
+
+        unsafe {
+            ptr::copy_nonoverlapping(
+                final_regs_buffer.contents() as *const u64,
+                final_regs.as_mut_ptr(),
+                32,
+            );
+            ptr::copy_nonoverlapping(
+                final_counters_buffer.contents() as *const u32,
+                final_counters.as_mut_ptr(),
+                2,
+            );
+            ptr::copy_nonoverlapping(
+                final_prog_digest_hash_buffer.contents() as *const u8,
+                final_prog_digest_hash.as_mut_ptr(),
+                64,
+            );
+            ptr::copy_nonoverlapping(
+                final_mem_digest_hash_buffer.contents() as *const u8,
+                final_mem_digest_hash.as_mut_ptr(),
+                64,
+            );
         }
-        None => {
-            // No GPU available, use CPU implementation
-            crate::b2::hash(salt, rom, nb_loops, nb_instrs)
+
+        Ok(TestExecOneResult {
+            final_regs,
+            final_ip: final_counters[0],
+            final_memory_counter: final_counters[1],
+            final_prog_digest_hash,
+            final_mem_digest_hash,
+        })
+    }
+
+    pub fn test_vm_finalize_kernel(
+        &self,
+        rom_digest: &[u8; 64],
+        salt: &[u8],
+    ) -> Result<[u8; 64], Box<dyn std::error::Error>> {
+        // Input buffers
+        let rom_digest_buffer = self.device.new_buffer_with_data(
+            rom_digest.as_ptr() as *const c_void,
+            rom_digest.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let salt_buffer = self.device.new_buffer_with_data(
+            salt.as_ptr() as *const c_void,
+            salt.len() as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        let salt_len_data = salt.len() as u32;
+        let salt_len_buffer = self.device.new_buffer_with_data(
+            &salt_len_data as *const u32 as *const c_void,
+            std::mem::size_of_val(&salt_len_data) as u64,
+            metal::MTLResourceOptions::StorageModeManaged,
+        );
+
+        // Output buffer
+        let output_hash_buffer = self
+            .device
+            .new_buffer(64, metal::MTLResourceOptions::StorageModeManaged);
+
+        let command_buffer = self.command_queue.new_command_buffer();
+        let compute_encoder = command_buffer.new_compute_command_encoder();
+
+        compute_encoder.set_buffer(0, Some(&rom_digest_buffer), 0);
+        compute_encoder.set_buffer(1, Some(&salt_buffer), 0);
+        compute_encoder.set_buffer(2, Some(&salt_len_buffer), 0);
+        compute_encoder.set_buffer(3, Some(&output_hash_buffer), 0);
+
+        compute_encoder.set_compute_pipeline_state(&self.finalize_pipeline_state);
+
+        let threadgroup_size = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+
+        compute_encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        compute_encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        let mut final_hash = [0u8; 64];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                output_hash_buffer.contents() as *const u8,
+                final_hash.as_mut_ptr(),
+                64,
+            );
         }
+
+        Ok(final_hash)
     }
 }
 
-pub fn hash_gpu(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
-    let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize::new returned None!");
+/// The output of a single instruction execution test on the GPU.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TestExecOneResult {
+    pub final_regs: [u64; 32],
+    pub final_ip: u32,
+    pub final_memory_counter: u32,
+    pub final_prog_digest_hash: [u8; 64],
+    pub final_mem_digest_hash: [u8; 64],
+}
+
+pub fn hash_gpu<R: crate::rom::RomLike>(
+    salt: &[u8],
+    rom: &R,
+    nb_loops: u32,
+    nb_instrs: u32,
+) -> [u8; 64] {
+    let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
     metal_ashmaize
-        .hash_parallel(&[salt], rom, nb_loops, nb_instrs)
-        .unwrap()
+        .hash(&[salt], rom, nb_loops, nb_instrs)
+        .expect("GPU hash failed")
         .into_iter()
         .next()
-        .unwrap()
+        .expect("GPU hash did not return a result")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::b2::argon2;
-    use crate::{Rom, RomGenerationType};
+    use crate::b2::RomGenerationType;
+    use crate::b2::{VM, argon2};
+    use crate::rom::RomLike;
     use blake2::{Blake2b512, Digest}; // Import for CPU Blake2b
 
     #[test]
-    fn test_gpu_hash_basic() {
-        let rom = Rom::new(
-            b"test_seed",
-            RomGenerationType::TwoStep {
-                pre_size: 1024,
-                mixing_numbers: 4,
-            },
-            10_240,
-        );
+    fn test_ashmaize_hash_kernel() {
+        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
 
-        let salt = b"test_salt";
-        let result = hash_gpu_or_cpu(salt, &rom, 8, 256);
-
-        // Should produce a 64-byte result
-        assert_eq!(result.len(), 64);
-
-        // Should be different from zero array
-        assert!(!result.iter().all(|&x| x == 0));
-    }
-
-    #[test]
-    fn test_gpu_hash_consistency() {
-        let rom = Rom::new(
-            b"test_seed",
-            RomGenerationType::TwoStep {
-                pre_size: 1024,
-                mixing_numbers: 4,
-            },
-            10_240,
-        );
-
-        let salt = b"consistent_test";
-        let result1 = hash_gpu_or_cpu(salt, &rom, 8, 256);
-        let result2 = hash_gpu_or_cpu(salt, &rom, 8, 256);
-
-        // Same input should produce same output
-        assert_eq!(result1, result2);
-    }
-
-    #[test]
-    fn test_gpu_hash_vs_cpu() {
         let rom = Rom::new(
             b"comparison_seed",
             RomGenerationType::TwoStep {
@@ -962,12 +1146,166 @@ mod tests {
             10_240,
         );
 
-        let salt = b"comparison_test";
-        let cpu_result = crate::b2::hash(salt, &rom, 8, 256);
-        let gpu_result = hash_gpu(salt, &rom, 8, 256);
+        let salts: Vec<&[u8]> = vec![b"test_salt_1", b"test_salt_2", b"a_slightly_longer_salt_3"];
 
-        assert_eq!(cpu_result, gpu_result);
+        // To test the parallel implementation, all salts must have the same length.
+        // Let's find the max length and pad the others.
+        let max_len = salts.iter().map(|s| s.len()).max().unwrap_or(0);
+        let padded_salts: Vec<Vec<u8>> = salts
+            .iter()
+            .map(|s| {
+                let mut padded = s.to_vec();
+                padded.resize(max_len, 0);
+                padded
+            })
+            .collect();
+
+        let salt_slices: Vec<&[u8]> = padded_salts.iter().map(|s| s.as_slice()).collect();
+
+        // CPU computation
+        let cpu_results: Vec<[u8; 64]> = salt_slices
+            .iter()
+            .map(|s| crate::b2::hash(s, &rom, 8, 256))
+            .collect();
+
+        // GPU computation
+        let gpu_results = metal_ashmaize
+            .hash(&salt_slices, &rom, 8, 256)
+            .expect("GPU hash failed");
+
+        assert_eq!(
+            cpu_results.len(),
+            gpu_results.len(),
+            "Mismatch in number of hashes returned"
+        );
+
+        for i in 0..cpu_results.len() {
+            assert_eq!(
+                cpu_results[i], gpu_results[i],
+                "Mismatch for salt index {}",
+                i
+            );
+        }
     }
+
+    #[test]
+    fn test_light_rom_gpu_hashing() {
+        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+
+        // 1. Create a full Rom
+        let full_rom = Rom::new(
+            b"light_rom_gpu_test_seed",
+            RomGenerationType::TwoStep {
+                pre_size: 1024,
+                mixing_numbers: 4,
+            },
+            10_240,
+        );
+
+        // 2. Create a LightRom from it
+        let light_rom = full_rom.shrink();
+        assert!(light_rom.data().len() < full_rom.data().len());
+
+        let salt = b"light_rom_gpu_salt";
+
+        // 3. Calculate the expected hash on the CPU for comparison
+        let expected_hash = crate::b2::hash(salt, &full_rom, 8, 256);
+
+        // 4. Calculate the hash on the GPU using the LightRom
+        let gpu_result = metal_ashmaize
+            .hash(&[salt], &light_rom, 8, 256)
+            .expect("GPU hash with LightRom failed")
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // 5. Compare the results
+        assert_eq!(
+            expected_hash, gpu_result,
+            "GPU hash with LightRom does not match expected hash"
+        );
+    }
+
+    // #[test]
+    // fn benchmark_cpu_vs_gpu() {
+    //     use std::time::Instant;
+
+    //     println!("\n--- Ashmaize CPU vs. GPU Benchmark ---");
+
+    //     // 1. Setup
+    //     const NB_LOOPS: u32 = 8;
+    //     const NB_INSTRS: u32 = 256;
+    //     const ROM_SIZE: usize = 1 * 1024 * 1024; // 1MB
+    //     let batch_sizes = [1, 10, 100, 1000];
+
+    //     println!(
+    //         "Parameters: nb_loops={}, nb_instrs={}, rom_size={}MB",
+    //         NB_LOOPS,
+    //         NB_INSTRS,
+    //         ROM_SIZE / (1024 * 1024)
+    //     );
+    //     println!("{:-<55}", "");
+    //     println!(
+    //         "{: >10} | {: >20} | {: >20}",
+    //         "Batch Size", "CPU Time", "GPU Time"
+    //     );
+    //     println!("{:-<55}", "");
+
+    //     let full_rom = Rom::new(
+    //         b"benchmark_seed",
+    //         RomGenerationType::TwoStep {
+    //             pre_size: 16 * 1024,
+    //             mixing_numbers: 4,
+    //         },
+    //         ROM_SIZE,
+    //     );
+    //     let light_rom = full_rom.shrink();
+    //     let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+
+    //     let max_batch_size = *batch_sizes.iter().max().unwrap_or(&0);
+    //     let salts: Vec<Vec<u8>> = (0..max_batch_size)
+    //         .map(|i| format!("salt_{}", i).into_bytes())
+    //         .collect();
+
+    //     // Pad salts to the same length for the GPU implementation
+    //     let max_len = salts.iter().map(|s| s.len()).max().unwrap_or(0);
+    //     let padded_salts: Vec<Vec<u8>> = salts
+    //         .into_iter()
+    //         .map(|mut s| {
+    //             s.resize(max_len, 0);
+    //             s
+    //         })
+    //         .collect();
+    //     let salt_slices: Vec<&[u8]> = padded_salts.iter().map(|s| s.as_slice()).collect();
+
+    //     // 2. Execution Loop
+    //     for &batch_size in &batch_sizes {
+    //         // CPU Benchmark
+    //         let cpu_start = Instant::now();
+    //         let cpu_results: Vec<_> = salt_slices[..batch_size]
+    //             .iter()
+    //             .map(|s| crate::b2::hash(s, &light_rom, NB_LOOPS, NB_INSTRS))
+    //             .collect();
+    //         let cpu_duration = cpu_start.elapsed();
+
+    //         // GPU Benchmark
+    //         let gpu_start = Instant::now();
+    //         let gpu_results = metal_ashmaize
+    //             .hash(&salt_slices[..batch_size], &light_rom, NB_LOOPS, NB_INSTRS)
+    //             .expect("GPU hash failed");
+    //         let gpu_duration = gpu_start.elapsed();
+
+    //         // Verification
+    //         assert_eq!(cpu_results[0], gpu_results[0]);
+
+    //         // Print Results
+    //         println!(
+    //             "{: >10} | {: >20.2?} | {: >20.2?}",
+    //             batch_size, cpu_duration, gpu_duration
+    //         );
+    //     }
+    //     println!("{:-<55}", "");
+    // }
 
     #[test]
     fn test_metal_blake2b_vs_cpu() {
@@ -1067,6 +1405,95 @@ mod tests {
     }
 
     #[test]
+    fn test_metal_instruction() {
+        let instructions_to_test: Vec<(&str, [u8; 20])> = vec![
+            ("ADD R1, R0, R8", {
+                let mut bytes = [0u8; 20];
+                bytes[0] = 1; // ADD
+                bytes[1] = 0x00; // Reg, Reg
+                let rs: u16 = (0 << 10) | (8 << 5) | 1; // r1=0, r2=8, r3=1
+                bytes[2..4].copy_from_slice(&rs.to_be_bytes());
+                bytes
+            }),
+            ("MUL R2, R3, 10 (lit)", {
+                let mut bytes = [0u8; 20];
+                bytes[0] = 40; // MUL
+                bytes[1] = 0x09; // Reg, Literal
+                let rs: u16 = (3 << 10) | (0 << 5) | 2; // r1=3, r2=unused, r3=2
+                bytes[2..4].copy_from_slice(&rs.to_be_bytes());
+                bytes[12..20].copy_from_slice(&10u64.to_le_bytes()); // lit2
+                bytes
+            }),
+            ("XOR R4, Mem(0x100), R5", {
+                let mut bytes = [0u8; 20];
+                bytes[0] = 148; // XOR
+                bytes[1] = 0x50; // Mem, Reg
+                let rs: u16 = (0 << 10) | (5 << 5) | 4; // r1=unused, r2=5, r3=4
+                bytes[2..4].copy_from_slice(&rs.to_be_bytes());
+                bytes[4..12].copy_from_slice(&0x100u64.to_le_bytes()); // lit1 for addr
+                bytes
+            }),
+            ("ISQRT R9, R10", {
+                let mut bytes = [0u8; 20];
+                bytes[0] = 128; // ISQRT
+                bytes[1] = 0x00; // Reg, (op2 unused)
+                let rs: u16 = (10 << 10) | (0 << 5) | 9; // r1=10, r2=unused, r3=9
+                bytes[2..4].copy_from_slice(&rs.to_be_bytes());
+                bytes
+            }),
+        ];
+
+        let metal_ashmaize = MetalAshmaize::new().unwrap();
+        let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * 1024);
+        let nb_instrs = 256;
+        let salt = b"instruction_salt";
+
+        for (name, instruction_bytes) in instructions_to_test {
+            println!("Testing instruction: {}", name);
+
+            let mut vm_cpu = VM::new(&rom.digest, nb_instrs, salt);
+
+            vm_cpu.program.get_instructions_mut()[0..20].copy_from_slice(&instruction_bytes);
+
+            // 3. Execute on CPU (Oracle)
+            crate::b2::execute_one_instruction(&mut vm_cpu, &rom);
+            let expected_regs = vm_cpu.regs;
+            let expected_prog_hash = vm_cpu.prog_digest.clone().finalize();
+            let expected_mem_hash = vm_cpu.mem_digest.clone().finalize();
+
+            // 4. Execute on GPU
+            let result_gpu = metal_ashmaize
+                .test_execute_one_instruction(
+                    &rom,
+                    &rom.digest.0,
+                    salt,
+                    nb_instrs,
+                    &instruction_bytes,
+                )
+                .unwrap();
+
+            // 5. Compare results
+            assert_eq!(
+                expected_regs, result_gpu.final_regs,
+                "Register states do not match for instruction '{}'!",
+                name
+            );
+            assert_eq!(
+                expected_prog_hash[..],
+                result_gpu.final_prog_digest_hash[..],
+                "Program digests do not match for instruction '{}'!",
+                name
+            );
+            assert_eq!(
+                expected_mem_hash[..],
+                result_gpu.final_mem_digest_hash[..],
+                "Memory digests do not match for instruction '{}'!",
+                name
+            );
+        }
+    }
+
+    #[test]
     fn test_metal_post_instructions_vs_cpu() {
         let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
 
@@ -1125,5 +1552,25 @@ mod tests {
 
         // Compare results
         assert_eq!(cpu_vm.regs, gpu_final_regs);
+    }
+
+    #[test]
+    fn test_metal_finalize_vs_cpu() {
+        let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
+
+        let rom = Rom::new(b"finalize_test_seed", RomGenerationType::FullRandom, 1024);
+        let nb_instrs = 256;
+        let salt = b"finalize_test_salt";
+
+        // CPU VM finalization
+        let cpu_vm = VM::new(&rom.digest, nb_instrs, salt);
+        let cpu_hash = cpu_vm.finalize();
+
+        // GPU VM finalization
+        let gpu_hash = metal_ashmaize
+            .test_vm_finalize_kernel(&rom.digest.0, salt)
+            .expect("GPU vm_finalize kernel failed");
+
+        assert_eq!(cpu_hash, gpu_hash);
     }
 }

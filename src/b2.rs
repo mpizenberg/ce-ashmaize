@@ -22,7 +22,7 @@ Now you can use the [`hash`] function to execute a random program against
 the [`Rom`] that will generate a Digest.
 
 ```
-use ashmaize::hash;
+use ashmaize::b2::hash;
 # use ashmaize::{Rom, RomGenerationType};
 # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * 1_024);
 
@@ -36,8 +36,8 @@ let digest = hash(b"salt", &rom, 8, 256);
 
 use blake2::{Blake2b512, Digest};
 
-use crate::rom::RomDigest;
-pub use crate::rom::{Rom, RomGenerationType};
+pub use crate::rom::{LightRom, Rom, RomGenerationType};
+use crate::rom::{RomDigest, RomLike};
 
 // 1 byte operator
 // 3 bytes operands (src1, src2, dst)
@@ -179,7 +179,7 @@ impl VM {
         }
     }
 
-    pub fn step(&mut self, rom: &Rom) {
+    pub fn step<R: RomLike>(&mut self, rom: &R) {
         execute_one_instruction(self, rom);
         self.ip = self.ip.wrapping_add(1);
     }
@@ -222,7 +222,7 @@ impl VM {
         self.loop_counter = self.loop_counter.wrapping_add(1)
     }
 
-    pub fn execute(&mut self, rom: &Rom, instr: u32) {
+    pub fn execute<R: RomLike>(&mut self, rom: &R, instr: u32) {
         self.program.shuffle(&self.prog_seed);
         for _ in 0..instr {
             self.step(rom)
@@ -281,6 +281,10 @@ impl Program {
     pub fn get_instructions(&self) -> &[u8] {
         &self.instructions
     }
+
+    pub fn get_instructions_mut(&mut self) -> &mut [u8] {
+        &mut self.instructions
+    }
 }
 
 #[derive(Clone)]
@@ -321,7 +325,7 @@ fn decode_instruction(instruction: &[u8; INSTR_SIZE]) -> Instruction {
     }
 }
 
-pub fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
+pub fn execute_one_instruction<R: RomLike>(vm: &mut VM, rom: &R) {
     let prog_chunk = *vm.program.at(vm.ip);
 
     macro_rules! mem_access64 {
@@ -444,7 +448,7 @@ pub fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
 /// # Example
 ///
 /// ```
-/// # use ashmaize::{Rom, RomGenerationType, hash};
+/// # use ashmaize::{Rom, RomGenerationType, b2::hash};
 /// # const KB: usize = 1_024;
 /// # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * KB);
 /// const NB_LOOPS: u32 = 8;
@@ -452,10 +456,10 @@ pub fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
 /// let digest = hash(b"salt", &rom, NB_LOOPS, NB_INSTRS);
 /// ```
 ///
-pub fn hash(salt: &[u8], rom: &Rom, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
+pub fn hash<R: RomLike>(salt: &[u8], rom: &R, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
     assert!(nb_loops >= 2);
     assert!(nb_instrs >= 256);
-    let mut vm = VM::new(&rom.digest, nb_instrs, salt);
+    let mut vm = VM::new(&rom.digest(), nb_instrs, salt);
     for _ in 0..nb_loops {
         vm.execute(rom, nb_instrs);
     }
@@ -515,6 +519,38 @@ mod tests {
 
         let h = hash(b"hello", &rom, 8, NB_INSTR);
         println!("{:?}", h);
+    }
+
+    #[test]
+    fn test_light_rom_cpu_hashing() {
+        const PRE_SIZE: usize = 16 * 1024;
+        const SIZE: usize = 1 * 1024 * 1024; // 1MB ROM for faster test
+        const NB_INSTR: u32 = 256;
+
+        // 1. Create a full Rom and compute the hash
+        let full_rom = Rom::new(
+            b"light_rom_test_seed",
+            RomGenerationType::TwoStep {
+                pre_size: PRE_SIZE,
+                mixing_numbers: 4,
+            },
+            SIZE,
+        );
+        let expected_hash = hash(b"hello", &full_rom, 8, NB_INSTR);
+
+        // 2. Create a LightRom and compute the hash
+        let light_rom = full_rom.shrink();
+
+        // Verify that the light rom is indeed smaller
+        assert!(light_rom.data.len() < full_rom.data.len());
+
+        let actual_hash = hash(b"hello", &light_rom, 8, NB_INSTR);
+
+        // 3. Compare the results
+        assert_eq!(
+            expected_hash, actual_hash,
+            "Hash mismatch between full Rom and LightRom"
+        );
     }
 
     #[test]

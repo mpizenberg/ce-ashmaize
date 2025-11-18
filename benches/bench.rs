@@ -57,34 +57,6 @@ fn criterion_benchmark(c: &mut Criterion) {
         })
     });
 
-    // Benchmark the Metal GPU version running 64 hashes in parallel (if available)
-    #[cfg(target_os = "macos")]
-    {
-        use ashmaize::metal::MetalAshmaize;
-        if let Some(metal_ashmaize) = MetalAshmaize::new() {
-            let metal_instance = metal_ashmaize; // Store the instance
-            c.bench_function("metal::hash x64 (GPU)", |b| {
-                b.iter(|| {
-                    let mut salts = Vec::new();
-                    for i in 0..64 {
-                        salts.push(format!("salt{}", i).into_bytes());
-                    }
-                    // Convert to slices for the function
-                    let salt_refs: Vec<&[u8]> = salts.iter().map(|v| v.as_slice()).collect();
-                    let _ = metal_instance.hash_parallel(&salt_refs, &rom, 8, 256);
-                })
-            });
-        } else {
-            // Fallback benchmark that will show a warning
-            c.bench_function("metal::hash x64 (GPU) - NOT AVAILABLE", |b| {
-                b.iter(|| {
-                    // This is just a placeholder since Metal is not available
-                    std::hint::black_box(());
-                })
-            });
-        }
-    }
-
     #[cfg(not(target_os = "macos"))]
     {
         c.bench_function("metal::hash x64 (GPU) - PLATFORM NOT SUPPORTED", |b| {

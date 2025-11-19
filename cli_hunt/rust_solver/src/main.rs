@@ -47,6 +47,7 @@ pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
     (hash_prefix & !difficulty_mask) == 0
 }
 
+#[allow(clippy::identity_op)]
 pub fn init_rom(no_pre_mine_hex: &str) -> Rom {
     Rom::new(
         no_pre_mine_hex.as_bytes(),
@@ -90,13 +91,8 @@ fn main() {
     #[cfg(target_os = "macos")]
     let gpu_handle = {
         // --- Check GPU Availability ---
-        let gpu = MetalAshmaize::new();
-        if gpu.is_none() {
-            eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
-            None
-        } else {
+        if let Some(metal) = MetalAshmaize::new() {
             // --- Spawn GPU Worker Thread (using thread::spawn to avoid deadlock) ---
-            let metal = gpu.unwrap();
             let winning_nonce = Arc::clone(&winning_nonce);
             let stop_signal = Arc::clone(&stop_signal);
             let light_rom = Arc::clone(&light_rom);
@@ -163,6 +159,9 @@ fn main() {
                     current_nonce += GPU_BATCH_SIZE as u64;
                 }
             }))
+        } else {
+            eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
+            None
         }
     };
 

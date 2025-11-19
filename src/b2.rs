@@ -193,20 +193,20 @@ impl VM {
 
         let prog_value = {
             let mut digest = self.prog_digest.clone();
-            digest.update(&sum_regs.to_le_bytes());
+            digest.update(sum_regs.to_le_bytes());
             digest.finalize()
         };
         let mem_value = {
             let mut digest = self.mem_digest.clone();
-            digest.update(&sum_regs.to_le_bytes());
+            digest.update(sum_regs.to_le_bytes());
             digest.finalize()
         };
 
         let mixing_value = {
             let mut hasher = Blake2b512::new();
-            hasher.update(&prog_value);
-            hasher.update(&mem_value);
-            hasher.update(&self.loop_counter.to_le_bytes());
+            hasher.update(prog_value);
+            hasher.update(mem_value);
+            hasher.update(self.loop_counter.to_le_bytes());
             hasher.finalize()
         };
         let mut mixing_out = vec![0; NB_REGS * REGISTER_SIZE * 32];
@@ -234,11 +234,11 @@ impl VM {
         let prog_digest = self.prog_digest.finalize();
         let mem_digest = self.mem_digest.finalize();
         let mut context = Blake2b512::new();
-        context.update(&prog_digest);
-        context.update(&mem_digest);
-        context.update(&self.memory_counter.to_le_bytes());
+        context.update(prog_digest);
+        context.update(mem_digest);
+        context.update(self.memory_counter.to_le_bytes());
         for r in self.regs {
-            context.update(&r.to_le_bytes());
+            context.update(r.to_le_bytes());
         }
         context.finalize().into()
     }
@@ -410,7 +410,7 @@ pub fn execute_one_instruction<R: RomLike>(vm: &mut VM, rom: &R) {
                     input[0..8].copy_from_slice(&src1.to_le_bytes());
                     input[8..16].copy_from_slice(&src2.to_le_bytes());
 
-                    let out = Blake2b512::digest(&input);
+                    let out = Blake2b512::digest(input);
                     if let Some(chunk) = out.chunks(8).nth(v as usize) {
                         u64::from_le_bytes(*<&[u8; 8]>::try_from(chunk).unwrap())
                     } else {
@@ -440,7 +440,7 @@ pub fn execute_one_instruction<R: RomLike>(vm: &mut VM, rom: &R) {
             vm.regs[r3 as usize] = result;
         }
     }
-    vm.prog_digest.update(&prog_chunk);
+    vm.prog_digest.update(prog_chunk);
 }
 
 /// For the given [`Rom`] and parameter, compute the digest of the given `salt`
@@ -459,7 +459,7 @@ pub fn execute_one_instruction<R: RomLike>(vm: &mut VM, rom: &R) {
 pub fn hash<R: RomLike>(salt: &[u8], rom: &R, nb_loops: u32, nb_instrs: u32) -> [u8; 64] {
     assert!(nb_loops >= 2);
     assert!(nb_instrs >= 256);
-    let mut vm = VM::new(&rom.digest(), nb_instrs, salt);
+    let mut vm = VM::new(rom.digest(), nb_instrs, salt);
     for _ in 0..nb_loops {
         vm.execute(rom, nb_instrs);
     }
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn test_light_rom_cpu_hashing() {
         const PRE_SIZE: usize = 16 * 1024;
-        const SIZE: usize = 1 * 1024 * 1024; // 1MB ROM for faster test
+        const SIZE: usize = 1024 * 1024; // 1MB ROM for faster test
         const NB_INSTR: u32 = 256;
 
         // 1. Create a full Rom and compute the hash
@@ -611,7 +611,7 @@ pub mod argon2 {
         let mut pos = 32;
 
         while bytes > 64 {
-            let vi_hash = Blake2b512::digest(&vi_prev);
+            let vi_hash = Blake2b512::digest(vi_prev);
             vi_prev.copy_from_slice(&vi_hash);
             output[pos..pos + 32].copy_from_slice(&vi_prev[0..32]);
 

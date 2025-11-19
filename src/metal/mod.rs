@@ -19,6 +19,9 @@ pub struct MetalAshmaize {
     finalize_pipeline_state: ComputePipelineState,
 }
 
+type VmInitResult = Result<([u64; crate::b2::NB_REGS], u32, [u8; 64], u32, u32), Box<dyn std::error::Error>>;
+type PostInstructionsResult = Result<([u64; crate::b2::NB_REGS], [u8; 64], u32), Box<dyn std::error::Error>>;
+
 impl MetalAshmaize {
     // Instrumentation Metrics (must match ashmaize.metal)
     const METRIC_BLAKE2B_ROUND_COUNT: usize = 0;
@@ -622,7 +625,7 @@ impl MetalAshmaize {
         &self,
         rom_digest: &[u8; 64],
         salt: &[u8],
-    ) -> Result<([u64; crate::b2::NB_REGS], u32, [u8; 64], u32, u32), Box<dyn std::error::Error>>
+    ) -> VmInitResult
     {
         // Input buffers
         let rom_digest_buffer = self.device.new_buffer_with_data(
@@ -655,7 +658,7 @@ impl MetalAshmaize {
         );
         let output_prog_seed_buffer = self
             .device
-            .new_buffer(64 as u64, metal::MTLResourceOptions::StorageModeManaged);
+            .new_buffer(64_u64, metal::MTLResourceOptions::StorageModeManaged);
         let output_memory_counter_buffer = self.device.new_buffer(
             std::mem::size_of::<u32>() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
@@ -755,7 +758,7 @@ impl MetalAshmaize {
         &self,
         rom_digest: &[u8; 64],
         salt: &[u8],
-    ) -> Result<([u64; crate::b2::NB_REGS], [u8; 64], u32), Box<dyn std::error::Error>> {
+    ) -> PostInstructionsResult {
         // Input buffers
         let rom_digest_buffer = self.device.new_buffer_with_data(
             rom_digest.as_ptr() as *const c_void,
@@ -781,7 +784,7 @@ impl MetalAshmaize {
         );
         let output_prog_seed_buffer = self
             .device
-            .new_buffer(64 as u64, metal::MTLResourceOptions::StorageModeManaged);
+            .new_buffer(64_u64, metal::MTLResourceOptions::StorageModeManaged);
         let output_loop_counter_buffer = self.device.new_buffer(
             std::mem::size_of::<u32>() as u64,
             metal::MTLResourceOptions::StorageModeManaged,
@@ -1341,7 +1344,7 @@ mod tests {
             let cpu_duration = {
                 if batch_size <= 1000 {
                     let cpu_start = Instant::now();
-                    let cpu_results: Vec<_> = salt_slices[..batch_size]
+                    let _cpu_results: Vec<_> = salt_slices[..batch_size]
                         .iter()
                         .map(|s| crate::b2::hash(s, &light_rom, NB_LOOPS, NB_INSTRS))
                         .collect();
@@ -1353,7 +1356,7 @@ mod tests {
 
             // GPU Benchmark
             let gpu_start = Instant::now();
-            let gpu_results = metal_ashmaize
+            let _gpu_results = metal_ashmaize
                 .hash(&salt_slices[..batch_size], &light_rom, NB_LOOPS, NB_INSTRS)
                 .expect("GPU hash failed");
             let gpu_duration = gpu_start.elapsed();
@@ -1512,7 +1515,7 @@ mod tests {
                 let mut bytes = [0u8; 20];
                 bytes[0] = 1; // ADD
                 bytes[1] = 0x00; // Reg, Reg
-                let rs: u16 = (0 << 10) | (8 << 5) | 1; // r1=0, r2=8, r3=1
+                let rs: u16 = (8 << 5) | 1; // r1=0, r2=8, r3=1
                 bytes[2..4].copy_from_slice(&rs.to_be_bytes());
                 bytes
             }),
@@ -1520,7 +1523,7 @@ mod tests {
                 let mut bytes = [0u8; 20];
                 bytes[0] = 40; // MUL
                 bytes[1] = 0x09; // Reg, Literal
-                let rs: u16 = (3 << 10) | (0 << 5) | 2; // r1=3, r2=unused, r3=2
+                let rs: u16 = (3 << 10) | 2; // r1=3, r2=unused, r3=2
                 bytes[2..4].copy_from_slice(&rs.to_be_bytes());
                 bytes[12..20].copy_from_slice(&10u64.to_le_bytes()); // lit2
                 bytes
@@ -1529,7 +1532,7 @@ mod tests {
                 let mut bytes = [0u8; 20];
                 bytes[0] = 148; // XOR
                 bytes[1] = 0x50; // Mem, Reg
-                let rs: u16 = (0 << 10) | (5 << 5) | 4; // r1=unused, r2=5, r3=4
+                let rs: u16 = (5 << 5) | 4; // r1=unused, r2=5, r3=4
                 bytes[2..4].copy_from_slice(&rs.to_be_bytes());
                 bytes[4..12].copy_from_slice(&0x100u64.to_le_bytes()); // lit1 for addr
                 bytes
@@ -1538,7 +1541,7 @@ mod tests {
                 let mut bytes = [0u8; 20];
                 bytes[0] = 128; // ISQRT
                 bytes[1] = 0x00; // Reg, (op2 unused)
-                let rs: u16 = (10 << 10) | (0 << 5) | 9; // r1=10, r2=unused, r3=9
+                let rs: u16 = (10 << 10) | 9; // r1=10, r2=unused, r3=9
                 bytes[2..4].copy_from_slice(&rs.to_be_bytes());
                 bytes
             }),

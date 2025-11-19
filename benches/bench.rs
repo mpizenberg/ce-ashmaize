@@ -17,7 +17,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     //                 pre_size: 16 * MB,
     //                 mixing_numbers: 4,
     //             },
-    //             1 * GB,
+    //             GB,
     //         )
     //     })
     // });
@@ -29,7 +29,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             pre_size: 16 * MB,
             mixing_numbers: 4,
         },
-        1 * GB,
+        GB,
     );
 
     // // hash takes 720 us

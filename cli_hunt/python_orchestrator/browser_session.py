@@ -8,6 +8,7 @@ import logging
 import random
 import time
 import threading
+import numpy as np
 from queue import Queue
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 from playwright_stealth import Stealth
@@ -228,7 +229,9 @@ class BrowserSession:
                 page.goto(init_url, wait_until='networkidle', timeout=30000)
 
                 # Add random delay to appear more human
-                initial_delay = random.uniform(2.0, 4.0)
+                # Use log-normal distribution for more realistic timing
+                initial_delay = np.random.lognormal(mean=1.2, sigma=0.4)
+                initial_delay = max(2.0, min(8.0, initial_delay))
                 logging.info(f"Waiting {initial_delay:.2f}s on home page...")
                 time.sleep(initial_delay)
 
@@ -237,7 +240,9 @@ class BrowserSession:
                 page.goto(self.mining_page_url, wait_until='networkidle', timeout=30000)
 
                 # Add delay and simulate human-like behavior on mining page
-                mining_delay = random.uniform(2.0, 5.0)
+                # Use log-normal distribution for more realistic timing
+                mining_delay = np.random.lognormal(mean=1.3, sigma=0.5)
+                mining_delay = max(2.0, min(10.0, mining_delay))
                 logging.info(f"Waiting {mining_delay:.2f}s to simulate reading mining page...")
                 time.sleep(mining_delay)
 
@@ -252,7 +257,9 @@ class BrowserSession:
                             });
                         }
                     """)
-                    time.sleep(random.uniform(0.5, 1.2))
+                    scroll_delay_1 = np.random.lognormal(mean=-0.2, sigma=0.4)
+                    scroll_delay_1 = max(0.3, min(2.0, scroll_delay_1))
+                    time.sleep(scroll_delay_1)
 
                     # Scroll back to simulate looking around
                     page.evaluate("""
@@ -263,22 +270,191 @@ class BrowserSession:
                             });
                         }
                     """)
-                    time.sleep(random.uniform(0.3, 0.8))
+                    scroll_delay_2 = np.random.lognormal(mean=-0.5, sigma=0.4)
+                    scroll_delay_2 = max(0.2, min(1.5, scroll_delay_2))
+                    time.sleep(scroll_delay_2)
                 except:
                     pass  # Ignore errors if page doesn't support scrolling
 
                 logging.info("Browser session initialized successfully")
                 self._initialized = True
 
+                # Track session creation time for rotation
+                session_start_time = time.time()
+                # Randomize session lifetime (30-60 minutes) to avoid detection
+                max_session_age = np.random.lognormal(mean=8.3, sigma=0.3)
+                max_session_age = max(1800, min(3600, max_session_age))  # 30-60 minutes
+                logging.info(f"Session will rotate after ~{max_session_age/60:.1f} minutes")
+
                 # Track last activity time for keepalive
                 last_keepalive = time.time()
-                keepalive_interval = random.uniform(180, 300)  # 3-5 minutes
+                # Use log-normal for keepalive intervals (more realistic than uniform)
+                keepalive_interval = np.random.lognormal(mean=5.5, sigma=0.3)
+                keepalive_interval = max(180, min(360, keepalive_interval))  # 3-6 minutes
 
                 # Process requests in a loop
                 while not self._stop_event.is_set():
                     try:
-                        # Periodic keepalive: simulate user activity on the mining page
                         current_time = time.time()
+
+                        # Check if session needs rotation (aged too much)
+                        session_age = current_time - session_start_time
+                        if session_age > max_session_age:
+                            logging.info(f"Session has aged {session_age/60:.1f} minutes, rotating...")
+                            # Close current session
+                            page.close()
+                            context.close()
+
+                            # Create new context with fresh fingerprint
+                            user_agent = random.choice(USER_AGENTS)
+                            viewport = random.choice(VIEWPORTS)
+                            timezone = random.choice(TIMEZONES)
+                            locale = random.choice(LOCALES)
+
+                            logging.info(f"New session - User-Agent: {user_agent[:50]}...")
+                            logging.info(f"New session - Viewport: {viewport}")
+
+                            context = browser.new_context(
+                                viewport=viewport,
+                                user_agent=user_agent,
+                                locale=locale,
+                                timezone_id=timezone,
+                                extra_http_headers={
+                                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                                    'Accept-Language': 'en-US,en;q=0.9',
+                                    'Accept-Encoding': 'gzip, deflate, br',
+                                    'DNT': '1',
+                                    'Connection': 'keep-alive',
+                                    'Upgrade-Insecure-Requests': '1',
+                                    'Sec-Fetch-Dest': 'document',
+                                    'Sec-Fetch-Mode': 'navigate',
+                                    'Sec-Fetch-Site': 'none',
+                                    'Sec-Fetch-User': '?1',
+                                    'Cache-Control': 'max-age=0',
+                                }
+                            )
+
+                            # Re-apply init script and stealth
+                            context.add_init_script("""
+                                // Override navigator.webdriver
+                                Object.defineProperty(navigator, 'webdriver', {
+                                    get: () => false,
+                                });
+
+                                // Add chrome runtime
+                                window.chrome = {
+                                    runtime: {},
+                                    loadTimes: function() {},
+                                    csi: function() {},
+                                    app: {},
+                                };
+
+                                // Override permissions
+                                const originalQuery = window.navigator.permissions.query;
+                                window.navigator.permissions.query = (parameters) => (
+                                    parameters.name === 'notifications' ?
+                                        Promise.resolve({ state: Notification.permission }) :
+                                        originalQuery(parameters)
+                                );
+
+                                // Randomize canvas fingerprint
+                                const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                                HTMLCanvasElement.prototype.toDataURL = function(type) {
+                                    const result = originalToDataURL.apply(this, arguments);
+                                    return result.replace(/.$/, String.fromCharCode(result.charCodeAt(result.length - 1) + Math.floor(Math.random() * 3)));
+                                };
+
+                                // Randomize WebGL fingerprint
+                                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                                    if (parameter === 37445) {
+                                        return 'Intel Inc.';
+                                    }
+                                    if (parameter === 37446) {
+                                        return 'Intel Iris OpenGL Engine';
+                                    }
+                                    return getParameter.apply(this, arguments);
+                                };
+
+                                // Override plugin detection
+                                Object.defineProperty(navigator, 'plugins', {
+                                    get: () => [
+                                        {
+                                            name: 'Chrome PDF Plugin',
+                                            filename: 'internal-pdf-viewer',
+                                            description: 'Portable Document Format',
+                                        },
+                                        {
+                                            name: 'Chrome PDF Viewer',
+                                            filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                                            description: '',
+                                        },
+                                        {
+                                            name: 'Native Client',
+                                            filename: 'internal-nacl-plugin',
+                                            description: '',
+                                        }
+                                    ],
+                                });
+
+                                Object.defineProperty(navigator, 'languages', {
+                                    get: () => ['en-US', 'en'],
+                                });
+
+                                Object.defineProperty(navigator, 'platform', {
+                                    get: () => 'MacIntel',
+                                });
+
+                                Object.defineProperty(navigator, 'hardwareConcurrency', {
+                                    get: () => """ + str(random.choice([4, 8, 12, 16])) + """,
+                                });
+
+                                Object.defineProperty(navigator, 'deviceMemory', {
+                                    get: () => """ + str(random.choice([4, 8, 16])) + """,
+                                });
+
+                                if (navigator.getBattery) {
+                                    navigator.getBattery = () => Promise.resolve({
+                                        charging: true,
+                                        chargingTime: 0,
+                                        dischargingTime: Infinity,
+                                        level: 1,
+                                    });
+                                }
+
+                                const originalDateNow = Date.now;
+                                Date.now = function() {
+                                    return originalDateNow() + Math.floor(Math.random() * 5);
+                                };
+
+                                Object.defineProperty(window.performance.timing, 'navigationStart', {
+                                    get: () => Date.now() - Math.floor(Math.random() * 10000 + 5000),
+                                });
+                            """)
+
+                            page = context.new_page()
+                            stealth = Stealth()
+                            stealth.apply_stealth_sync(page)
+
+                            # Re-initialize session
+                            logging.info(f"Re-initializing session by visiting {init_url}")
+                            page.goto(init_url, wait_until='networkidle', timeout=30000)
+                            init_delay = np.random.lognormal(mean=1.2, sigma=0.4)
+                            init_delay = max(2.0, min(8.0, init_delay))
+                            time.sleep(init_delay)
+
+                            page.goto(self.mining_page_url, wait_until='networkidle', timeout=30000)
+                            mining_delay = np.random.lognormal(mean=1.3, sigma=0.5)
+                            mining_delay = max(2.0, min(10.0, mining_delay))
+                            time.sleep(mining_delay)
+
+                            # Reset session timers
+                            session_start_time = current_time
+                            max_session_age = np.random.lognormal(mean=8.3, sigma=0.3)
+                            max_session_age = max(1800, min(3600, max_session_age))
+                            logging.info(f"Session rotated. Next rotation in ~{max_session_age/60:.1f} minutes")
+
+                        # Periodic keepalive: simulate user activity on the mining page
                         if current_time - last_keepalive > keepalive_interval:
                             try:
                                 logging.info("Performing keepalive interaction on mining page...")
@@ -286,7 +462,9 @@ class BrowserSession:
                                 if page.url != self.mining_page_url:
                                     logging.info(f"Page drifted to {page.url}, navigating back to mining page")
                                     page.goto(self.mining_page_url, wait_until='networkidle', timeout=30000)
-                                    time.sleep(random.uniform(1.0, 2.0))
+                                    nav_delay = np.random.lognormal(mean=0.3, sigma=0.4)
+                                    nav_delay = max(0.5, min(3.0, nav_delay))
+                                    time.sleep(nav_delay)
 
                                 # Simulate random user activity
                                 activity_choice = random.choice(['scroll', 'click', 'hover'])
@@ -301,7 +479,9 @@ class BrowserSession:
                                             });
                                         }
                                     """)
-                                    time.sleep(random.uniform(0.5, 1.0))
+                                    scroll_wait = np.random.lognormal(mean=-0.3, sigma=0.4)
+                                    scroll_wait = max(0.3, min(1.5, scroll_wait))
+                                    time.sleep(scroll_wait)
                                     # Scroll back
                                     page.evaluate("""
                                         () => {
@@ -319,7 +499,9 @@ class BrowserSession:
                                     )
 
                                 last_keepalive = current_time
-                                keepalive_interval = random.uniform(180, 300)  # Randomize next interval
+                                # Use log-normal for next keepalive interval
+                                keepalive_interval = np.random.lognormal(mean=5.5, sigma=0.3)
+                                keepalive_interval = max(180, min(360, keepalive_interval))  # 3-6 minutes
                                 logging.info(f"Keepalive complete. Next in ~{keepalive_interval/60:.1f} minutes")
                             except Exception as e:
                                 logging.warning(f"Keepalive interaction failed: {e}")
@@ -335,12 +517,13 @@ class BrowserSession:
                         url = request['url']
                         timeout = request.get('timeout', 30000)
 
-                        # Add human-like delay before request (more variation)
-                        # Use exponential distribution for more realistic timing
-                        base_delay = random.uniform(1.0, 3.0)
-                        # Occasionally add a longer pause (10% chance)
-                        if random.random() < 0.1:
-                            base_delay += random.uniform(2.0, 5.0)
+                        # Add human-like delay before request
+                        # Use log-normal distribution for more realistic human timing
+                        # Log-normal better models human reaction times than uniform
+                        # mean=1.0, sigma=0.5 gives delays mostly 1-4s with occasional longer pauses
+                        base_delay = np.random.lognormal(mean=1.0, sigma=0.5)
+                        # Clamp to reasonable range (0.5s to 10s)
+                        base_delay = max(0.5, min(10.0, base_delay))
                         time.sleep(base_delay)
 
                         response_data = None

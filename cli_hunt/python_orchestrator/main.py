@@ -429,7 +429,9 @@ def fetcher_worker(db_manager, stop_event, tui_app, headless=True):
             except Exception as e:
                 tui_app.post_message(LogMessage(f"Error fetching challenge: {e}"))
 
-        stop_event.wait(FETCH_INTERVAL)
+        # Add jitter to avoid predictable timing patterns
+        jittered_interval = FETCH_INTERVAL * random.uniform(0.8, 1.2)
+        stop_event.wait(jittered_interval)
     logging.info("Fetcher thread stopped.")
 
 
@@ -652,7 +654,9 @@ def solver_worker(
             else:
                 # If there are available slots (or no active tasks),
                 # wait the full solve_interval before checking for *new* challenges again.
-                stop_event.wait(solve_interval)
+                # Add jitter to avoid predictable timing patterns
+                jittered_interval = solve_interval * random.uniform(0.8, 1.2)
+                stop_event.wait(jittered_interval)
 
     logging.info("Solver thread stopped.")
 
@@ -803,7 +807,9 @@ def submission_worker(db_manager, stop_event, tui_app):
             if stop_event.is_set():
                 break
         if not challenges_left:
-            stop_event.wait(10)
+            # Add jitter to avoid predictable timing patterns
+            jittered_interval = 10 * random.uniform(0.8, 1.2)
+            stop_event.wait(jittered_interval)
     logging.info("Submission thread stopped.")
 
 
@@ -814,7 +820,9 @@ def saver_worker(db_manager, stop_event, interval, tui_app):
         )
     )
     while not stop_event.is_set():
-        stop_event.wait(interval)
+        # Add jitter to avoid predictable timing patterns
+        jittered_interval = interval * random.uniform(0.8, 1.2)
+        stop_event.wait(jittered_interval)
         if stop_event.is_set():
             break
         tui_app.post_message(LogMessage("Performing periodic save..."))
@@ -830,7 +838,9 @@ def stats_worker(db_manager, stop_event, interval, tui_app):
         )
     )
     while not stop_event.is_set():
-        stop_event.wait(interval)
+        # Add jitter to avoid predictable timing patterns
+        jittered_interval = interval * random.uniform(0.8, 1.2)
+        stop_event.wait(jittered_interval)
         if stop_event.is_set():
             break
 

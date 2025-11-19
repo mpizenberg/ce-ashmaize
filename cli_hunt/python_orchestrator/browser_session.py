@@ -46,8 +46,9 @@ LOCALES = [
 class BrowserSession:
     """Manages a Playwright browser session for making API requests in a separate thread."""
 
-    def __init__(self, headless=True):
+    def __init__(self, headless=True, mining_page_url=None):
         self.headless = headless
+        self.mining_page_url = mining_page_url or "https://sm.midnight.gd/wizard/mine"
         self._initialized = False
         self._thread = None
         self._request_queue = Queue()
@@ -222,22 +223,42 @@ class BrowserSession:
                 stealth = Stealth()
                 stealth.apply_stealth_sync(page)
 
-                # Visit the init URL to establish session cookies
+                # First visit the home page to establish session cookies
                 logging.info(f"Initializing session by visiting {init_url}")
                 page.goto(init_url, wait_until='networkidle', timeout=30000)
 
-                # Add random delay to appear more human (longer initial delay)
-                initial_delay = random.uniform(2.0, 5.0)
-                logging.info(f"Waiting {initial_delay:.2f}s to simulate human browsing...")
+                # Add random delay to appear more human
+                initial_delay = random.uniform(2.0, 4.0)
+                logging.info(f"Waiting {initial_delay:.2f}s on home page...")
                 time.sleep(initial_delay)
 
-                # Simulate some human-like behavior on the initial page
+                # Navigate to the mining page (where we'll "stay" during operations)
+                logging.info(f"Navigating to mining page: {self.mining_page_url}")
+                page.goto(self.mining_page_url, wait_until='networkidle', timeout=30000)
+
+                # Add delay and simulate human-like behavior on mining page
+                mining_delay = random.uniform(2.0, 5.0)
+                logging.info(f"Waiting {mining_delay:.2f}s to simulate reading mining page...")
+                time.sleep(mining_delay)
+
+                # Simulate some human-like behavior on the mining page
                 try:
                     # Random scroll to appear more human
                     page.evaluate("""
                         () => {
                             window.scrollTo({
                                 top: Math.random() * 500,
+                                behavior: 'smooth'
+                            });
+                        }
+                    """)
+                    time.sleep(random.uniform(0.5, 1.2))
+
+                    # Scroll back to simulate looking around
+                    page.evaluate("""
+                        () => {
+                            window.scrollTo({
+                                top: 0,
                                 behavior: 'smooth'
                             });
                         }
@@ -249,9 +270,61 @@ class BrowserSession:
                 logging.info("Browser session initialized successfully")
                 self._initialized = True
 
+                # Track last activity time for keepalive
+                last_keepalive = time.time()
+                keepalive_interval = random.uniform(180, 300)  # 3-5 minutes
+
                 # Process requests in a loop
                 while not self._stop_event.is_set():
                     try:
+                        # Periodic keepalive: simulate user activity on the mining page
+                        current_time = time.time()
+                        if current_time - last_keepalive > keepalive_interval:
+                            try:
+                                logging.info("Performing keepalive interaction on mining page...")
+                                # Ensure we're still on the mining page
+                                if page.url != self.mining_page_url:
+                                    logging.info(f"Page drifted to {page.url}, navigating back to mining page")
+                                    page.goto(self.mining_page_url, wait_until='networkidle', timeout=30000)
+                                    time.sleep(random.uniform(1.0, 2.0))
+
+                                # Simulate random user activity
+                                activity_choice = random.choice(['scroll', 'click', 'hover'])
+                                if activity_choice == 'scroll':
+                                    # Random scroll
+                                    page.evaluate("""
+                                        () => {
+                                            const scrollAmount = Math.random() * 300 + 100;
+                                            window.scrollBy({
+                                                top: scrollAmount,
+                                                behavior: 'smooth'
+                                            });
+                                        }
+                                    """)
+                                    time.sleep(random.uniform(0.5, 1.0))
+                                    # Scroll back
+                                    page.evaluate("""
+                                        () => {
+                                            window.scrollTo({
+                                                top: 0,
+                                                behavior: 'smooth'
+                                            });
+                                        }
+                                    """)
+                                elif activity_choice == 'hover':
+                                    # Simulate mouse movement
+                                    page.mouse.move(
+                                        random.randint(100, 800),
+                                        random.randint(100, 600)
+                                    )
+
+                                last_keepalive = current_time
+                                keepalive_interval = random.uniform(180, 300)  # Randomize next interval
+                                logging.info(f"Keepalive complete. Next in ~{keepalive_interval/60:.1f} minutes")
+                            except Exception as e:
+                                logging.warning(f"Keepalive interaction failed: {e}")
+                                last_keepalive = current_time  # Reset anyway to avoid rapid retries
+
                         # Check for new requests (with timeout to allow checking stop_event)
                         try:
                             request = self._request_queue.get(timeout=0.5)
@@ -276,43 +349,21 @@ class BrowserSession:
                         try:
                             if request_type == 'get':
                                 logging.info(f"Browser GET: {url}")
-                                response = page.goto(url, wait_until='networkidle', timeout=timeout)
 
-                                if response is None:
-                                    error = "Navigation failed - no response received"
-                                else:
-                                    # Get response body
-                                    body = response.body().decode('utf-8')
-
-                                    # Try to parse as JSON
-                                    json_data = None
-                                    try:
-                                        import json
-                                        json_data = json.loads(body)
-                                    except:
-                                        pass
-
-                                    response_data = {
-                                        'status': response.status,
-                                        'headers': response.headers,
-                                        'body': body,
-                                        'json': json_data,
-                                        'ok': response.ok,
-                                    }
-
-                            elif request_type == 'post':
-                                logging.info(f"Browser POST: {url}")
-                                data = request.get('data')
-
-                                # Use fetch API to make POST request
+                                # Make the request using fetch from the mining page context
+                                # This ensures proper Referer header and looks like a real user request
                                 result = page.evaluate("""
                                     async (params) => {
                                         const response = await fetch(params.url, {
-                                            method: 'POST',
+                                            method: 'GET',
                                             headers: {
-                                                'Content-Type': 'application/json',
+                                                'Accept': 'application/json, text/plain, */*',
+                                                'Accept-Language': 'en-US,en;q=0.9',
+                                                'Sec-Fetch-Dest': 'empty',
+                                                'Sec-Fetch-Mode': 'cors',
+                                                'Sec-Fetch-Site': 'same-origin',
                                             },
-                                            body: params.data ? JSON.stringify(params.data) : undefined,
+                                            credentials: 'include',
                                         });
 
                                         const text = await response.text();
@@ -335,6 +386,56 @@ class BrowserSession:
                                             body: text,
                                             json: json,
                                             ok: response.ok,
+                                            url: response.url,
+                                        };
+                                    }
+                                """, {'url': url})
+
+                                response_data = result
+
+                            elif request_type == 'post':
+                                logging.info(f"Browser POST: {url}")
+                                data = request.get('data')
+
+                                # Make the POST request using fetch from the mining page context
+                                # This ensures proper Referer header and looks like a real user request
+                                result = page.evaluate("""
+                                    async (params) => {
+                                        const response = await fetch(params.url, {
+                                            method: 'POST',
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                                'Accept': 'application/json, text/plain, */*',
+                                                'Accept-Language': 'en-US,en;q=0.9',
+                                                'Sec-Fetch-Dest': 'empty',
+                                                'Sec-Fetch-Mode': 'cors',
+                                                'Sec-Fetch-Site': 'same-origin',
+                                            },
+                                            body: params.data ? JSON.stringify(params.data) : undefined,
+                                            credentials: 'include',
+                                        });
+
+                                        const text = await response.text();
+                                        let json = null;
+                                        try {
+                                            json = JSON.parse(text);
+                                        } catch (e) {
+                                            // Not JSON
+                                        }
+
+                                        // Convert headers to object
+                                        const headers = {};
+                                        response.headers.forEach((value, key) => {
+                                            headers[key] = value;
+                                        });
+
+                                        return {
+                                            status: response.status,
+                                            headers: headers,
+                                            body: text,
+                                            json: json,
+                                            ok: response.ok,
+                                            url: response.url,
                                         };
                                     }
                                 """, {'url': url, 'data': data})

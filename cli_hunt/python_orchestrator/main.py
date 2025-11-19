@@ -30,14 +30,26 @@ DEFAULT_SOLVE_INTERVAL = 2 * 60  # 2 minutes
 DEFAULT_SAVE_INTERVAL = 10 * 60  # 10 minutes
 DEFAULT_STATS_INTERVAL = 60 * 60  # 60 minutes
 
+# API URLs
+BASE_URL = "https://sm.midnight.gd/api"
+SESSION_INIT_URL = "https://sm.midnight.gd/"
 
-# --- HTTP Session Setup ---
-session = requests.Session()
 
 # --- HTTP Session Setup ---
 # Using curl_cffi to impersonate a browser's TLS fingerprint. This is more
 # effective at avoiding blocking than just setting User-Agent headers.
 session = requests.Session(impersonate="chrome110")
+
+
+def initialize_session():
+    """Initialize session by making a request to the main page to establish cookies."""
+    try:
+        logging.info(f"Initializing session with {SESSION_INIT_URL}...")
+        response = session.get(SESSION_INIT_URL, timeout=10)
+        response.raise_for_status()
+        logging.info("Session initialized successfully with cookies.")
+    except Exception as e:
+        logging.warning(f"Failed to initialize session: {e}")
 
 
 # --- Logging Setup ---
@@ -59,7 +71,7 @@ def setup_logging():
 def fetch_wallet_statistics(address):
     """Fetch mining statistics for a wallet from the API."""
     try:
-        url = f"https://scavenger.prod.gd.midnighttge.io/statistics/{address}"
+        url = f"{BASE_URL}/statistics/{address}"
         response = session.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -247,6 +259,8 @@ class DatabaseManager:
 
 def fetcher_worker(db_manager, stop_event, tui_app):
     tui_app.post_message(LogMessage("Fetcher thread started."))
+    # Re-initialize session to ensure fresh cookies
+    initialize_session()
     while not stop_event.is_set():
         tui_app.post_message(LogMessage("Fetching new challenges..."))
         addresses = db_manager.get_addresses()
@@ -256,9 +270,7 @@ def fetcher_worker(db_manager, stop_event, tui_app):
             )
         else:
             try:
-                response = session.get(
-                    "https://scavenger.prod.gd.midnighttge.io/challenge"
-                )
+                response = session.get(f"{BASE_URL}/challenge")
                 response.raise_for_status()
                 challenge_data = response.json()["challenge"]
 
@@ -523,7 +535,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
     tui_app.post_message(LogMessage(msg))
     update = {}
     api_okay = True
-    submit_url = f"https://scavenger.prod.gd.midnighttge.io/solution/{address}/{c['challengeId']}/{c['salt']}"
+    submit_url = f"{BASE_URL}/solution/{address}/{c['challengeId']}/{c['salt']}"
     try:
         submit_response = session.post(submit_url)
         submit_response.raise_for_status()
@@ -762,6 +774,10 @@ def init_db(json_files):
 def run_orchestrator(args):
     """Starts and manages the TUI and all worker threads."""
     logging.info("Starting orchestrator TUI...")
+
+    # Initialize session with cookies before starting workers
+    initialize_session()
+
     db_manager = DatabaseManager()
 
     worker_functions = {

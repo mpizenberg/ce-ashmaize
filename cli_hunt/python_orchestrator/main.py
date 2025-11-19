@@ -52,7 +52,9 @@ def initialize_session(headless=True):
     global browser
     try:
         logging.info(f"Initializing browser session with {SESSION_INIT_URL}...")
-        logging.info(f"Browser mode: {'headless' if headless else 'non-headless (visible)'}")
+        logging.info(
+            f"Browser mode: {'headless' if headless else 'non-headless (visible)'}"
+        )
         browser = get_browser_session(headless=headless)
         browser.initialize(SESSION_INIT_URL)
         logging.info("Browser session initialized successfully with cookies.")
@@ -832,13 +834,14 @@ def stats_worker(db_manager, stop_event, interval, tui_app):
         if stop_event.is_set():
             break
 
-        # Update wallet statistics from API
-        addresses = db_manager.get_addresses()
-        tui_app.post_message(LogMessage("Updating wallet statistics..."))
-        for address in addresses:
-            (crypto_receipts, night) = fetch_wallet_statistics(address)
-            if crypto_receipts is not None and night is not None:
-                db_manager.update_wallet_statistics(address, crypto_receipts, night)
+        # Avoid asking for statistics to avoid too many requests
+        # # Update wallet statistics from API
+        # addresses = db_manager.get_addresses()
+        # tui_app.post_message(LogMessage("Updating wallet statistics..."))
+        # for address in addresses:
+        #     (crypto_receipts, night) = fetch_wallet_statistics(address)
+        #     if crypto_receipts is not None and night is not None:
+        #         db_manager.update_wallet_statistics(address, crypto_receipts, night)
 
         # Get all stats and calculate total
         (all_receipts, all_night) = db_manager.get_all_wallet_statistics()
@@ -919,7 +922,7 @@ def run_orchestrator(args):
     logging.info("Starting orchestrator TUI...")
 
     # Initialize session with cookies before starting workers
-    headless = not args.visible_browser if hasattr(args, 'visible_browser') else True
+    headless = not args.visible_browser if hasattr(args, "visible_browser") else True
     initialize_session(headless=headless)
 
     db_manager = DatabaseManager()

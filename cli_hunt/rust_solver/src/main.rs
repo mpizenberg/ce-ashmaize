@@ -37,6 +37,8 @@ struct Args {
     no_pre_mine_hour: String,
     #[arg(long)]
     cpu_threads: Option<usize>,
+    #[arg(long)]
+    gpu: bool,
 }
 
 pub fn hash_structure_good(hash: &[u8], difficulty_mask: u32) -> bool {
@@ -90,83 +92,100 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     let gpu_handle = {
-        // --- Check GPU Availability ---
+        // --- Check GPU Availability and Flag ---
         if let Some(metal) = MetalAshmaize::new() {
-            // --- Spawn GPU Worker Thread (using thread::spawn to avoid deadlock) ---
-            let winning_nonce = Arc::clone(&winning_nonce);
-            let stop_signal = Arc::clone(&stop_signal);
-            let light_rom = Arc::clone(&light_rom);
-            let suffix = Arc::clone(&suffix);
+            if args.gpu {
+                // --- Spawn GPU Worker Thread (using thread::spawn to avoid deadlock) ---
+                let winning_nonce = Arc::clone(&winning_nonce);
+                let stop_signal = Arc::clone(&stop_signal);
+                let light_rom = Arc::clone(&light_rom);
+                let suffix = Arc::clone(&suffix);
 
-            Some(thread::spawn(move || {
-                eprintln!("Starting GPU mining from nonce {}...", GPU_NONCE_START);
-                let mut current_nonce = GPU_NONCE_START;
+                Some(thread::spawn(move || {
+                    eprintln!("Starting GPU mining from nonce {}...", GPU_NONCE_START);
+                    let mut current_nonce = GPU_NONCE_START;
 
-                loop {
-                    // Stop if another thread has found a solution or requested stop
-                    if winning_nonce.load(Ordering::Relaxed) != u64::MAX
-                        || stop_signal.load(Ordering::Relaxed)
-                    {
-                        break;
-                    }
-
-                    let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(GPU_BATCH_SIZE);
-                    for i in 0..GPU_BATCH_SIZE {
-                        preimages.push(
-                            format!("{:016x}{}", current_nonce + i as u64, &*suffix).into_bytes(),
-                        );
-                    }
-
-                    let preimage_slices: Vec<&[u8]> =
-                        preimages.iter().map(|p| p.as_slice()).collect();
-
-                    // Graceful error handling instead of panic
-                    let hash_results = match metal.hash(&preimage_slices, &*light_rom, 8, 256) {
-                        Ok(results) => results,
-                        Err(e) => {
-                            eprintln!("GPU hashing error: {:?}. Stopping GPU mining.", e);
-                            stop_signal.store(true, Ordering::SeqCst);
+                    loop {
+                        // Stop if another thread has found a solution or requested stop
+                        if winning_nonce.load(Ordering::Relaxed) != u64::MAX
+                            || stop_signal.load(Ordering::Relaxed)
+                        {
                             break;
                         }
-                    };
 
-                    let mut found_in_batch = false;
-                    for (i, hash_result) in hash_results.iter().enumerate() {
-                        if hash_structure_good(hash_result, difficulty_mask) {
-                            let found_nonce = current_nonce + i as u64;
-                            // Atomically try to set the winning nonce.
-                            if winning_nonce
-                                .compare_exchange(
-                                    u64::MAX,
-                                    found_nonce,
-                                    Ordering::SeqCst,
-                                    Ordering::Relaxed,
-                                )
-                                .is_ok()
-                            {
-                                eprintln!("\nSolution found by GPU at nonce: {:016x}", found_nonce);
+                        let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(GPU_BATCH_SIZE);
+                        for i in 0..GPU_BATCH_SIZE {
+                            preimages.push(
+                                format!("{:016x}{}", current_nonce + i as u64, &*suffix)
+                                    .into_bytes(),
+                            );
+                        }
+
+                        let preimage_slices: Vec<&[u8]> =
+                            preimages.iter().map(|p| p.as_slice()).collect();
+
+                        // Graceful error handling instead of panic
+                        let hash_results = match metal.hash(&preimage_slices, &*light_rom, 8, 256) {
+                            Ok(results) => results,
+                            Err(e) => {
+                                eprintln!("GPU hashing error: {:?}. Stopping GPU mining.", e);
+                                stop_signal.store(true, Ordering::SeqCst);
+                                break;
                             }
-                            // A solution is found (either by us or another thread). Stop work.
-                            found_in_batch = true;
-                            break;
+                        };
+
+                        let mut found_in_batch = false;
+                        for (i, hash_result) in hash_results.iter().enumerate() {
+                            if hash_structure_good(hash_result, difficulty_mask) {
+                                let found_nonce = current_nonce + i as u64;
+                                // Atomically try to set the winning nonce.
+                                if winning_nonce
+                                    .compare_exchange(
+                                        u64::MAX,
+                                        found_nonce,
+                                        Ordering::SeqCst,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                {
+                                    eprintln!(
+                                        "\nSolution found by GPU at nonce: {:016x}",
+                                        found_nonce
+                                    );
+                                }
+                                // A solution is found (either by us or another thread). Stop work.
+                                found_in_batch = true;
+                                break;
+                            }
                         }
-                    }
 
-                    if found_in_batch {
-                        break; // Exit the main GPU loop
-                    }
+                        if found_in_batch {
+                            break; // Exit the main GPU loop
+                        }
 
-                    current_nonce += GPU_BATCH_SIZE as u64;
-                }
-            }))
+                        current_nonce += GPU_BATCH_SIZE as u64;
+                    }
+                }))
+            } else {
+                eprintln!("GPU mining disabled. Mining will use CPU only.");
+                None
+            }
         } else {
-            eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
+            if args.gpu {
+                eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
+            } else {
+                eprintln!("GPU mining disabled. Mining will use CPU only.");
+            }
             None
         }
     };
 
     #[cfg(not(target_os = "macos"))]
-    eprintln!("GPU mining not available on this platform. Using CPU only.");
+    if args.gpu {
+        eprintln!(
+            "Warning: GPU mining requested but not available on this platform. Using CPU only."
+        );
+    }
 
     // --- Run CPU Workers on Main Thread using Rayon ---
     eprintln!("Starting CPU mining with {} threads...", num_cpu_threads);

@@ -87,18 +87,18 @@ def check_kasada_challenge(response):
         response: Browser response dict with 'headers' and 'body' keys
     """
     # Check for common Kasada indicators in headers
-    kasada_headers = ['x-kpsdk-cd', 'x-kpsdk-ct', 'x-kpsdk-r', 'x-kpsdk-v']
-    headers = response.get('headers', {})
+    kasada_headers = ["x-kpsdk-cd", "x-kpsdk-ct", "x-kpsdk-r", "x-kpsdk-v"]
+    headers = response.get("headers", {})
     for header in kasada_headers:
         if header in headers:
             logging.warning(f"Kasada challenge detected via header: {header}")
             return True
 
     # Check for Kasada in response body
-    body = response.get('body', '')
-    if body and ('kpsdk' in body.lower() or
-                 'kasada' in body.lower() or
-                 'x-kpsdk' in body.lower()):
+    body = response.get("body", "")
+    if body and (
+        "kpsdk" in body.lower() or "kasada" in body.lower() or "x-kpsdk" in body.lower()
+    ):
         logging.warning("Kasada challenge detected in response body")
         return True
 
@@ -110,17 +110,18 @@ class BrowserResponse:
 
     def __init__(self, browser_response):
         self._response = browser_response
-        self.status_code = browser_response['status']
-        self.ok = browser_response['ok']
-        self.headers = browser_response['headers']
-        self.text = browser_response['body']
-        self._json = browser_response['json']
+        self.status_code = browser_response["status"]
+        self.ok = browser_response["ok"]
+        self.headers = browser_response["headers"]
+        self.text = browser_response["body"]
+        self._json = browser_response["json"]
 
     def json(self):
         """Return parsed JSON response."""
         if self._json is not None:
             return self._json
         import json
+
         return json.loads(self.text)
 
     def raise_for_status(self):
@@ -129,7 +130,7 @@ class BrowserResponse:
             raise Exception(f"HTTP {self.status_code}: {self.text[:200]}")
 
 
-def make_api_request(url, method='get', add_delay=True, **kwargs):
+def make_api_request(url, method="get", add_delay=True, **kwargs):
     """
     Make an API request using Playwright browser with human-like delays.
 
@@ -148,23 +149,27 @@ def make_api_request(url, method='get', add_delay=True, **kwargs):
     global browser
 
     if browser is None:
-        raise RuntimeError("Browser session not initialized. Call initialize_session() first.")
+        raise RuntimeError(
+            "Browser session not initialized. Call initialize_session() first."
+        )
 
     # Extract timeout from kwargs (convert seconds to milliseconds)
-    timeout = kwargs.pop('timeout', 30) * 1000
+    timeout = kwargs.pop("timeout", 30) * 1000
 
     try:
-        if method.lower() == 'get':
+        if method.lower() == "get":
             response = browser.get(url, timeout=int(timeout))
-        elif method.lower() == 'post':
-            data = kwargs.pop('data', None)
+        elif method.lower() == "post":
+            data = kwargs.pop("data", None)
             response = browser.post(url, data=data, timeout=int(timeout))
         else:
             raise ValueError(f"Unsupported HTTP method: {method}")
 
         # Check for Kasada challenge
         if check_kasada_challenge(response):
-            raise Exception("Kasada bot detection challenge encountered. Request blocked.")
+            raise Exception(
+                "Kasada bot detection challenge encountered. Request blocked."
+            )
 
         # Wrap response to be compatible with requests library
         return BrowserResponse(response)
@@ -179,7 +184,7 @@ def fetch_wallet_statistics(address):
     """Fetch mining statistics for a wallet from the API."""
     try:
         url = f"{BASE_URL}/statistics/{address}"
-        response = make_api_request(url, method='get', timeout=10)
+        response = make_api_request(url, method="get", timeout=10)
         response.raise_for_status()
         data = response.json()
 
@@ -377,7 +382,7 @@ def fetcher_worker(db_manager, stop_event, tui_app):
             )
         else:
             try:
-                response = make_api_request(f"{BASE_URL}/challenge", method='get')
+                response = make_api_request(f"{BASE_URL}/challenge", method="get")
                 response.raise_for_status()
                 challenge_data = response.json()["challenge"]
 
@@ -416,7 +421,7 @@ def fetcher_worker(db_manager, stop_event, tui_app):
 
 
 def _solve_one_challenge(
-    db_manager, tui_app, stop_event, address, challenge, cpu_threads
+    db_manager, tui_app, stop_event, address, challenge, cpu_threads, gpu
 ):
     """Solves a single challenge."""
     c = challenge  # for brevity
@@ -441,7 +446,9 @@ def _solve_one_challenge(
             str(c["noPreMineHour"]),  # Convert to string for subprocess
         ]
         if cpu_threads is not None:
-            command += ["cpu-threads", str(cpu_threads)]
+            command += ["--cpu-threads", str(cpu_threads)]
+        if gpu:
+            command += ["--gpu"]
         start_time = datetime.now(timezone.utc)
         process = subprocess.Popen(
             command,
@@ -517,7 +524,13 @@ def _solve_one_challenge(
 
 
 def solver_worker(
-    db_manager, stop_event, solve_interval, tui_app, cpu_threads, challenge_selection
+    db_manager,
+    stop_event,
+    solve_interval,
+    tui_app,
+    cpu_threads,
+    challenge_selection,
+    gpu,
 ):
     tui_app.post_message(
         LogMessage(
@@ -599,6 +612,7 @@ def solver_worker(
                                 address,
                                 deepcopy(c),  # Pass a deepcopy
                                 cpu_threads,
+                                gpu,
                             )
                             active_futures.add(future)
                             challenges_dispatched_this_round += 1
@@ -640,7 +654,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
     api_okay = True
     submit_url = f"{BASE_URL}/solution/{address}/{c['challengeId']}/{c['salt']}"
     try:
-        submit_response = make_api_request(submit_url, method='post')
+        submit_response = make_api_request(submit_url, method="post")
         submit_response.raise_for_status()
         submitted_time = datetime.now(timezone.utc)
         tui_app.post_message(
@@ -705,7 +719,9 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
                 if "HTTP " in error_str:
                     parts = error_str.split("HTTP ", 1)[1]
                     status_code = int(parts.split(":", 1)[0])
-                    response_text = parts.split(":", 1)[1].strip() if ":" in parts else ""
+                    response_text = (
+                        parts.split(":", 1)[1].strip() if ":" in parts else ""
+                    )
 
                     message = ""
                     try:
@@ -718,7 +734,8 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
 
                     if (
                         status_code == 400
-                        and message == "Solution validation failed: Solution already exists"
+                        and message
+                        == "Solution validation failed: Solution already exists"
                     ):
                         update = {
                             "status": "solved",  # Submitted but not validated with receipt
@@ -909,6 +926,7 @@ def run_orchestrator(args):
         "stats_interval": args.stats_interval,
         "cpu_threads": args.cpu_threads,
         "challenge_selection": args.challenge_selection,
+        "gpu": args.gpu,
     }
 
     app = OrchestratorTUI(
@@ -967,6 +985,11 @@ def main():
         "--cpu-threads",
         type=int,
         help="Maximum number of cpu threads to run (default to 80%).",
+    )
+    run_parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable GPU mining (macOS only).",
     )
 
     args = parser.parse_args()

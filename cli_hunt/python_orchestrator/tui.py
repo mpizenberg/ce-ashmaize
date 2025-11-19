@@ -357,6 +357,7 @@ class OrchestratorTUI(App):
             self,
             cpu_threads,
             challenge_selection,
+            self.worker_args["gpu"],
         )
 
     @work(name="submission", group="workers", thread=True)

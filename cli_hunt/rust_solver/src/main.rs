@@ -1,4 +1,5 @@
 use ashmaize::b2::hash as cpu_hash;
+#[cfg(target_os = "macos")]
 use ashmaize::metal::MetalAshmaize;
 use ashmaize::{Rom, RomGenerationType};
 use clap::Parser;
@@ -10,7 +11,10 @@ use std::thread;
 
 pub const MB: usize = 1024 * 1024;
 pub const GB: usize = 1024 * MB;
+
+#[cfg(target_os = "macos")]
 const GPU_BATCH_SIZE: usize = 10000;
+#[cfg(target_os = "macos")]
 const GPU_NONCE_START: u64 = 1 << 52; // Start GPU mining from a high nonce to avoid collision with CPU
 
 mod tests;
@@ -79,16 +83,25 @@ fn main() {
         ((num_cores as f64 * 0.8).floor() as usize).max(1)
     });
 
-    // --- Check GPU Availability ---
-    let gpu_available = MetalAshmaize::new();
-    if gpu_available.is_none() {
-        eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
-    }
+    #[cfg(target_os = "macos")]
+    let gpu_available = {
+        // --- Check GPU Availability ---
+        let gpu = MetalAshmaize::new();
+        if gpu.is_none() {
+            eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
+        }
+        gpu
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("GPU mining not available on this platform. Using CPU only.");
 
     thread::scope(|s| {
-        // --- Spawn GPU Worker Thread (only if GPU is available) ---
-        if let Some(metal) = gpu_available {
-            s.spawn({
+        #[cfg(target_os = "macos")]
+        {
+            // --- Spawn GPU Worker Thread (only if GPU is available) ---
+            if let Some(metal) = gpu_available {
+                s.spawn({
                 let winning_nonce = Arc::clone(&winning_nonce);
                 let light_rom = Arc::clone(&light_rom);
                 let suffix = Arc::clone(&suffix);
@@ -149,7 +162,9 @@ fn main() {
                     }
                 }
             });
+            }
         }
+
         // --- Run CPU Workers on Main Thread using Rayon ---
         eprintln!("Starting CPU mining with {} threads...", num_cpu_threads);
         let pool = rayon::ThreadPoolBuilder::new()

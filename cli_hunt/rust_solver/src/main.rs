@@ -6,8 +6,9 @@ use clap::Parser;
 use rayon::prelude::*;
 use std::fmt::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
+use std::time::Duration;
 
 pub const MB: usize = 1024 * 1024;
 pub const GB: usize = 1024 * MB;
@@ -77,6 +78,9 @@ fn main() {
     // The first thread to find a solution will `compare_exchange` it. This also acts as the "solution found" flag.
     let winning_nonce = Arc::new(AtomicU64::new(u64::MAX));
 
+    // Shared stop signal: if any thread encounters an error or needs to stop, it sets this to true
+    let stop_signal = Arc::new(AtomicBool::new(false));
+
     // --- Thread and Concurrency Setup ---
     let num_cpu_threads = args.cpu_threads.unwrap_or_else(|| {
         let num_cores = num_cpus::get();
@@ -84,131 +88,154 @@ fn main() {
     });
 
     #[cfg(target_os = "macos")]
-    let gpu_available = {
+    let gpu_handle = {
         // --- Check GPU Availability ---
         let gpu = MetalAshmaize::new();
         if gpu.is_none() {
             eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
-        }
-        gpu
-    };
+            None
+        } else {
+            // --- Spawn GPU Worker Thread (using thread::spawn to avoid deadlock) ---
+            let metal = gpu.unwrap();
+            let winning_nonce = Arc::clone(&winning_nonce);
+            let stop_signal = Arc::clone(&stop_signal);
+            let light_rom = Arc::clone(&light_rom);
+            let suffix = Arc::clone(&suffix);
 
-    #[cfg(not(target_os = "macos"))]
-    eprintln!("GPU mining not available on this platform. Using CPU only.");
+            Some(thread::spawn(move || {
+                eprintln!("Starting GPU mining from nonce {}...", GPU_NONCE_START);
+                let mut current_nonce = GPU_NONCE_START;
 
-    thread::scope(|s| {
-        #[cfg(target_os = "macos")]
-        {
-            // --- Spawn GPU Worker Thread (only if GPU is available) ---
-            if let Some(metal) = gpu_available {
-                s.spawn({
-                let winning_nonce = Arc::clone(&winning_nonce);
-                let light_rom = Arc::clone(&light_rom);
-                let suffix = Arc::clone(&suffix);
-                move || {
-                    eprintln!("Starting GPU mining from nonce {}...", GPU_NONCE_START);
-                    let mut current_nonce = GPU_NONCE_START;
+                loop {
+                    // Stop if another thread has found a solution or requested stop
+                    if winning_nonce.load(Ordering::Relaxed) != u64::MAX
+                        || stop_signal.load(Ordering::Relaxed)
+                    {
+                        break;
+                    }
 
-                    loop {
-                        // Stop if another thread has found a solution
-                        if winning_nonce.load(Ordering::Relaxed) != u64::MAX {
+                    let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(GPU_BATCH_SIZE);
+                    for i in 0..GPU_BATCH_SIZE {
+                        preimages.push(
+                            format!("{:016x}{}", current_nonce + i as u64, &*suffix).into_bytes(),
+                        );
+                    }
+
+                    let preimage_slices: Vec<&[u8]> =
+                        preimages.iter().map(|p| p.as_slice()).collect();
+
+                    // Graceful error handling instead of panic
+                    let hash_results = match metal.hash(&preimage_slices, &*light_rom, 8, 256) {
+                        Ok(results) => results,
+                        Err(e) => {
+                            eprintln!("GPU hashing error: {:?}. Stopping GPU mining.", e);
+                            stop_signal.store(true, Ordering::SeqCst);
                             break;
                         }
+                    };
 
-                        let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(GPU_BATCH_SIZE);
-                        for i in 0..GPU_BATCH_SIZE {
-                            preimages.push(
-                                format!("{:016x}{}", current_nonce + i as u64, &*suffix)
-                                    .into_bytes(),
-                            );
-                        }
-
-                        let preimage_slices: Vec<&[u8]> =
-                            preimages.iter().map(|p| p.as_slice()).collect();
-                        let hash_results = metal
-                            .hash(&preimage_slices, &*light_rom, 8, 256)
-                            .expect("GPU hashing failed");
-
-                        let mut found_in_batch = false;
-                        for (i, hash_result) in hash_results.iter().enumerate() {
-                            if hash_structure_good(hash_result, difficulty_mask) {
-                                let found_nonce = current_nonce + i as u64;
-                                // Atomically try to set the winning nonce.
-                                if winning_nonce
-                                    .compare_exchange(
-                                        u64::MAX,
-                                        found_nonce,
-                                        Ordering::SeqCst,
-                                        Ordering::Relaxed,
-                                    )
-                                    .is_ok()
-                                {
-                                    eprintln!(
-                                        "\nSolution found by GPU at nonce: {:016x}",
-                                        found_nonce
-                                    );
-                                }
-                                // A solution is found (either by us or another thread). Stop work.
-                                found_in_batch = true;
-                                break;
-                            }
-                        }
-
-                        if found_in_batch {
-                            break; // Exit the main GPU loop
-                        }
-
-                        current_nonce += GPU_BATCH_SIZE as u64;
-                    }
-                }
-            });
-            }
-        }
-
-        // --- Run CPU Workers on Main Thread using Rayon ---
-        eprintln!("Starting CPU mining with {} threads...", num_cpu_threads);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(num_cpu_threads)
-            .build()
-            .unwrap();
-        pool.install(|| {
-            (0..num_cpu_threads as u64)
-                .into_par_iter()
-                .for_each(|thread_id| {
-                    let mut local_nonce = thread_id;
-                    let stride = num_cpu_threads as u64;
-                    let mut preimage = String::with_capacity(16 + suffix.len());
-
-                    // Loop until a solution is found by any thread
-                    while winning_nonce.load(Ordering::Relaxed) == u64::MAX {
-                        preimage.clear();
-                        write!(&mut preimage, "{:016x}{}", local_nonce, &*suffix).unwrap();
-                        let hash_result = cpu_hash(preimage.as_bytes(), &*light_rom, 8, 256);
-
-                        if hash_structure_good(&hash_result, difficulty_mask) {
-                            // Atomically try to set the winning nonce. If we succeed, we are the winner.
+                    let mut found_in_batch = false;
+                    for (i, hash_result) in hash_results.iter().enumerate() {
+                        if hash_structure_good(hash_result, difficulty_mask) {
+                            let found_nonce = current_nonce + i as u64;
+                            // Atomically try to set the winning nonce.
                             if winning_nonce
                                 .compare_exchange(
                                     u64::MAX,
-                                    local_nonce,
+                                    found_nonce,
                                     Ordering::SeqCst,
                                     Ordering::Relaxed,
                                 )
                                 .is_ok()
                             {
-                                eprintln!(
-                                    "\nSolution found by CPU thread {} at nonce: {:016x}",
-                                    thread_id, local_nonce
-                                );
+                                eprintln!("\nSolution found by GPU at nonce: {:016x}", found_nonce);
                             }
-                            // Break the loop whether we were the first or not, since a solution is now found.
+                            // A solution is found (either by us or another thread). Stop work.
+                            found_in_batch = true;
                             break;
                         }
-                        local_nonce += stride;
                     }
-                });
-        });
-    }); // `thread::scope` waits for all threads to finish
+
+                    if found_in_batch {
+                        break; // Exit the main GPU loop
+                    }
+
+                    current_nonce += GPU_BATCH_SIZE as u64;
+                }
+            }))
+        }
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    eprintln!("GPU mining not available on this platform. Using CPU only.");
+
+    // --- Run CPU Workers on Main Thread using Rayon ---
+    eprintln!("Starting CPU mining with {} threads...", num_cpu_threads);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_cpu_threads)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        (0..num_cpu_threads as u64)
+            .into_par_iter()
+            .for_each(|thread_id| {
+                let mut local_nonce = thread_id;
+                let stride = num_cpu_threads as u64;
+                let mut preimage = String::with_capacity(16 + suffix.len());
+
+                // Loop until a solution is found by any thread or stop signal is set
+                while winning_nonce.load(Ordering::Relaxed) == u64::MAX
+                    && !stop_signal.load(Ordering::Relaxed)
+                {
+                    preimage.clear();
+                    write!(&mut preimage, "{:016x}{}", local_nonce, &*suffix).unwrap();
+                    let hash_result = cpu_hash(preimage.as_bytes(), &*light_rom, 8, 256);
+
+                    if hash_structure_good(&hash_result, difficulty_mask) {
+                        // Atomically try to set the winning nonce. If we succeed, we are the winner.
+                        if winning_nonce
+                            .compare_exchange(
+                                u64::MAX,
+                                local_nonce,
+                                Ordering::SeqCst,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            eprintln!(
+                                "\nSolution found by CPU thread {} at nonce: {:016x}",
+                                thread_id, local_nonce
+                            );
+                        }
+                        // Break the loop whether we were the first or not, since a solution is now found.
+                        break;
+                    }
+                    local_nonce += stride;
+                }
+            });
+    });
+
+    // --- Wait for GPU Thread with Timeout ---
+    #[cfg(target_os = "macos")]
+    if let Some(handle) = gpu_handle {
+        // Signal GPU to stop if it hasn't already
+        stop_signal.store(true, Ordering::SeqCst);
+        loop {
+            if handle.is_finished() {
+                match handle.join() {
+                    Ok(_) => {
+                        eprintln!("GPU thread completed successfully.");
+                        break;
+                    }
+                    Err(_) => {
+                        eprintln!("GPU thread panicked.");
+                        break;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
 
     // --- Final Result ---
     let final_nonce = winning_nonce.load(Ordering::Relaxed);

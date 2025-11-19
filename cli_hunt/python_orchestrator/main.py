@@ -512,7 +512,7 @@ def solver_worker(
                     tui_app.post_message(LogMessage("No available challenges found."))
 
             # If all slots are full, wait for one future to complete, or a short timeout
-            if len(active_futures) >= cpu_threads and active_futures:
+            if len(active_futures) >= 1 and active_futures:
                 # Wait for at least one task to complete or a short period if none are done quickly
                 concurrent.futures.wait(
                     active_futures,

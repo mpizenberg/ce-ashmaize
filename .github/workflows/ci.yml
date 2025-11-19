@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [piz]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [piz]
 
 jobs:
   check:
@@ -17,56 +17,56 @@ jobs:
         rust: [stable]
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v5
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ matrix.rust }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
 
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-registry-
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-git-
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
 
-    - name: Cache target directory
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-target-
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-
 
-    - name: Check main library
-      run: cargo check --verbose
+      - name: Check main library
+        run: cargo check --verbose
 
-    - name: Check rust_solver
-      working-directory: cli_hunt/rust_solver
-      run: cargo check --verbose
+      - name: Check rust_solver
+        working-directory: cli_hunt/rust_solver
+        run: cargo check --verbose
 
-    - name: Build main library
-      run: cargo build --verbose
+      - name: Build main library
+        run: cargo build --verbose
 
-    - name: Build rust_solver
-      working-directory: cli_hunt/rust_solver
-      run: cargo build --verbose
+      - name: Build rust_solver
+        working-directory: cli_hunt/rust_solver
+        run: cargo build --verbose
 
-    - name: Run tests (non-GPU)
-      run: cargo test --lib --verbose
-      env:
-        RUST_BACKTRACE: 1
+      - name: Run tests (non-GPU)
+        run: cargo test --lib --verbose
+        env:
+          RUST_BACKTRACE: 1
 
   build-release:
     name: Build release on ${{ matrix.os }}
@@ -77,74 +77,74 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v5
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache cargo
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-release-
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
 
-    - name: Build rust_solver in release mode
-      working-directory: cli_hunt/rust_solver
-      run: cargo build --release --verbose
+      - name: Build rust_solver in release mode
+        working-directory: cli_hunt/rust_solver
+        run: cargo build --release --verbose
 
-    - name: Upload solver binary (Linux)
-      if: matrix.os == 'ubuntu-latest'
-      uses: actions/upload-artifact@v4
-      with:
-        name: ashmaize-solver-linux
-        path: cli_hunt/rust_solver/target/release/ashmaize-solver
+      - name: Upload solver binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashmaize-solver-linux
+          path: cli_hunt/rust_solver/target/release/ashmaize-solver
 
-    - name: Upload solver binary (macOS)
-      if: matrix.os == 'macos-latest'
-      uses: actions/upload-artifact@v4
-      with:
-        name: ashmaize-solver-macos
-        path: cli_hunt/rust_solver/target/release/ashmaize-solver
+      - name: Upload solver binary (macOS)
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashmaize-solver-macos
+          path: cli_hunt/rust_solver/target/release/ashmaize-solver
 
-    - name: Upload solver binary (Windows)
-      if: matrix.os == 'windows-latest'
-      uses: actions/upload-artifact@v4
-      with:
-        name: ashmaize-solver-windows
-        path: cli_hunt/rust_solver/target/release/ashmaize-solver.exe
+      - name: Upload solver binary (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ashmaize-solver-windows
+          path: cli_hunt/rust_solver/target/release/ashmaize-solver.exe
 
   clippy:
     name: Clippy (linting)
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v5
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
-    - name: Run clippy on main library
-      run: cargo clippy --all-targets -- -D warnings
+      - name: Run clippy on main library
+        run: cargo clippy --all-targets -- -D warnings
 
   fmt:
     name: Format check
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v5
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+      - name: Check formatting
+        run: cargo fmt --all -- --check

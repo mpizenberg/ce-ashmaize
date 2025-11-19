@@ -2,13 +2,14 @@ import argparse
 import json
 import logging
 import os
+import random
+import time
 import concurrent.futures
 import subprocess
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 
-from curl_cffi import requests
 from tui import (
     ChallengeUpdate,
     SolutionFound,
@@ -17,6 +18,7 @@ from tui import (
     RefreshTable,
     StatsUpdate,
 )
+from browser_session import get_browser_session, close_browser_session
 
 # --- Constants ---
 DB_FILE = "challenges.json"
@@ -35,21 +37,23 @@ BASE_URL = "https://sm.midnight.gd/api"
 SESSION_INIT_URL = "https://sm.midnight.gd/"
 
 
-# --- HTTP Session Setup ---
-# Using curl_cffi to impersonate a browser's TLS fingerprint. This is more
-# effective at avoiding blocking than just setting User-Agent headers.
-session = requests.Session(impersonate="chrome110")
+# --- Browser Session Setup ---
+# Using Playwright with a real Chromium browser to bypass Kasada bot detection.
+# This executes JavaScript and provides authentic browser fingerprinting.
+browser = None
 
 
 def initialize_session():
-    """Initialize session by making a request to the main page to establish cookies."""
+    """Initialize Playwright browser session with cookies."""
+    global browser
     try:
-        logging.info(f"Initializing session with {SESSION_INIT_URL}...")
-        response = session.get(SESSION_INIT_URL, timeout=10)
-        response.raise_for_status()
-        logging.info("Session initialized successfully with cookies.")
+        logging.info(f"Initializing browser session with {SESSION_INIT_URL}...")
+        browser = get_browser_session(headless=True)
+        browser.initialize(SESSION_INIT_URL)
+        logging.info("Browser session initialized successfully with cookies.")
     except Exception as e:
-        logging.warning(f"Failed to initialize session: {e}")
+        logging.error(f"Failed to initialize browser session: {e}")
+        raise
 
 
 # --- Logging Setup ---
@@ -67,12 +71,115 @@ def setup_logging():
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+# --- Anti-Bot Detection Helpers ---
+def add_human_delay(min_delay=0.5, max_delay=2.0):
+    """Add a random delay to simulate human behavior and avoid bot detection."""
+    delay = random.uniform(min_delay, max_delay)
+    time.sleep(delay)
+
+
+def check_kasada_challenge(response):
+    """
+    Check if the response contains Kasada bot detection challenge.
+    Returns True if a challenge is detected, False otherwise.
+
+    Args:
+        response: Browser response dict with 'headers' and 'body' keys
+    """
+    # Check for common Kasada indicators in headers
+    kasada_headers = ['x-kpsdk-cd', 'x-kpsdk-ct', 'x-kpsdk-r', 'x-kpsdk-v']
+    headers = response.get('headers', {})
+    for header in kasada_headers:
+        if header in headers:
+            logging.warning(f"Kasada challenge detected via header: {header}")
+            return True
+
+    # Check for Kasada in response body
+    body = response.get('body', '')
+    if body and ('kpsdk' in body.lower() or
+                 'kasada' in body.lower() or
+                 'x-kpsdk' in body.lower()):
+        logging.warning("Kasada challenge detected in response body")
+        return True
+
+    return False
+
+
+class BrowserResponse:
+    """Wrapper to make browser response compatible with requests library interface."""
+
+    def __init__(self, browser_response):
+        self._response = browser_response
+        self.status_code = browser_response['status']
+        self.ok = browser_response['ok']
+        self.headers = browser_response['headers']
+        self.text = browser_response['body']
+        self._json = browser_response['json']
+
+    def json(self):
+        """Return parsed JSON response."""
+        if self._json is not None:
+            return self._json
+        import json
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        """Raise an exception for HTTP error codes."""
+        if not self.ok:
+            raise Exception(f"HTTP {self.status_code}: {self.text[:200]}")
+
+
+def make_api_request(url, method='get', add_delay=True, **kwargs):
+    """
+    Make an API request using Playwright browser with human-like delays.
+
+    Args:
+        url: The URL to request
+        method: HTTP method ('get' or 'post')
+        add_delay: Whether to add a random delay before the request
+        **kwargs: Additional arguments (timeout, data, etc.)
+
+    Returns:
+        BrowserResponse object compatible with requests library
+
+    Raises:
+        Exception if Kasada challenge is detected or request fails
+    """
+    global browser
+
+    if browser is None:
+        raise RuntimeError("Browser session not initialized. Call initialize_session() first.")
+
+    # Extract timeout from kwargs (convert seconds to milliseconds)
+    timeout = kwargs.pop('timeout', 30) * 1000
+
+    try:
+        if method.lower() == 'get':
+            response = browser.get(url, timeout=int(timeout))
+        elif method.lower() == 'post':
+            data = kwargs.pop('data', None)
+            response = browser.post(url, data=data, timeout=int(timeout))
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
+        # Check for Kasada challenge
+        if check_kasada_challenge(response):
+            raise Exception("Kasada bot detection challenge encountered. Request blocked.")
+
+        # Wrap response to be compatible with requests library
+        return BrowserResponse(response)
+
+    except Exception as e:
+        logging.error(f"Browser request failed for {url}: {e}")
+        raise
+
+
 # --- Wallet Statistics Functions ---
 def fetch_wallet_statistics(address):
     """Fetch mining statistics for a wallet from the API."""
     try:
         url = f"{BASE_URL}/statistics/{address}"
-        response = session.get(url, timeout=10)
+        response = make_api_request(url, method='get', timeout=10)
         response.raise_for_status()
         data = response.json()
 
@@ -270,7 +377,7 @@ def fetcher_worker(db_manager, stop_event, tui_app):
             )
         else:
             try:
-                response = session.get(f"{BASE_URL}/challenge")
+                response = make_api_request(f"{BASE_URL}/challenge", method='get')
                 response.raise_for_status()
                 challenge_data = response.json()["challenge"]
 
@@ -301,12 +408,8 @@ def fetcher_worker(db_manager, stop_event, tui_app):
                     # Signal to the UI that a full refresh is needed to show the new column
                     tui_app.post_message(RefreshTable())
 
-            except requests.exceptions.RequestException as e:  # ty: ignore
+            except Exception as e:
                 tui_app.post_message(LogMessage(f"Error fetching challenge: {e}"))
-            except json.JSONDecodeError:
-                tui_app.post_message(
-                    LogMessage("Error decoding challenge API response.")
-                )
 
         stop_event.wait(FETCH_INTERVAL)
     logging.info("Fetcher thread stopped.")
@@ -537,7 +640,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
     api_okay = True
     submit_url = f"{BASE_URL}/solution/{address}/{c['challengeId']}/{c['salt']}"
     try:
-        submit_response = session.post(submit_url)
+        submit_response = make_api_request(submit_url, method='post')
         submit_response.raise_for_status()
         submitted_time = datetime.now(timezone.utc)
         tui_app.post_message(
@@ -586,43 +689,55 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
         msg = f"Failed to decode submission response for {c['challengeId']}."
         tui_app.post_message(LogMessage(msg))
         api_okay = False
-    except requests.exceptions.RequestException as e:  # ty: ignore
+    except Exception as e:
         msg = f"⚠️ Error submitting solution for {c['challengeId']}: {e}"
         tui_app.post_message(LogMessage(msg))
         update = {
             "status": "submitting",
         }
         api_okay = False
-        if e.response is not None:
-            status_code = e.response.status_code
-            message = ""
-            json_content = e.response.content.decode()
+
+        # Try to parse error response if it's an HTTP error
+        error_str = str(e)
+        if "HTTP" in error_str:
             try:
-                content = json.loads(json_content)
-                message = content["message"]
-                tui_app.post_message(LogMessage(f"Message: {message}"))
-            except json.JSONDecodeError:
-                pass
-            if (
-                status_code == 400
-                and message == "Solution validation failed: Solution already exists"
-            ):
-                update = {
-                    "status": "solved",  # Submitted but not validated with receipt
-                }
-                tui_app.post_message(
-                    LogMessage(
-                        f"Submission for {c['challengeId']} OK but already exists."
-                    )
-                )
-                api_okay = True
-            elif status_code == 429:
-                api_okay = False
-            elif 400 <= status_code < 500:
-                update = {
-                    "status": "submission_error",
-                }
-                api_okay = True
+                # Extract status code and response body from error message
+                if "HTTP " in error_str:
+                    parts = error_str.split("HTTP ", 1)[1]
+                    status_code = int(parts.split(":", 1)[0])
+                    response_text = parts.split(":", 1)[1].strip() if ":" in parts else ""
+
+                    message = ""
+                    try:
+                        content = json.loads(response_text)
+                        message = content.get("message", "")
+                        if message:
+                            tui_app.post_message(LogMessage(f"Message: {message}"))
+                    except:
+                        pass
+
+                    if (
+                        status_code == 400
+                        and message == "Solution validation failed: Solution already exists"
+                    ):
+                        update = {
+                            "status": "solved",  # Submitted but not validated with receipt
+                        }
+                        tui_app.post_message(
+                            LogMessage(
+                                f"Submission for {c['challengeId']} OK but already exists."
+                            )
+                        )
+                        api_okay = True
+                    elif status_code == 429:
+                        api_okay = False
+                    elif 400 <= status_code < 500:
+                        update = {
+                            "status": "submission_error",
+                        }
+                        api_okay = True
+            except:
+                pass  # Couldn't parse error, keep api_okay = False
         updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
@@ -801,8 +916,14 @@ def run_orchestrator(args):
         worker_functions=worker_functions,
         worker_args=worker_args,
     )
-    app.run()
-    logging.info("Orchestrator shut down.")
+
+    try:
+        app.run()
+    finally:
+        # Clean up browser session on shutdown
+        logging.info("Cleaning up browser session...")
+        close_browser_session()
+        logging.info("Orchestrator shut down.")
 
 
 def main():

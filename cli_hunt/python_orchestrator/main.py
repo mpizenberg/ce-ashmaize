@@ -780,7 +780,17 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
     return api_okay
 
 
-def submission_worker(db_manager, stop_event, tui_app):
+def submission_worker(db_manager, stop_event, tui_app, no_auto_submit=False):
+    if no_auto_submit:
+        tui_app.post_message(
+            LogMessage(
+                "Submission thread disabled (--no-auto-submit). Use 'export' command to submit via browser."
+            )
+        )
+        # Just wait indefinitely until stop
+        stop_event.wait()
+        return
+
     tui_app.post_message(LogMessage("Submission thread started."))
     backoff = 1
     while not stop_event.is_set():
@@ -953,6 +963,7 @@ def run_orchestrator(args):
         "challenge_selection": args.challenge_selection,
         "gpu": args.gpu,
         "headless": headless,
+        "no_auto_submit": args.no_auto_submit,
     }
 
     app = OrchestratorTUI(
@@ -1021,6 +1032,11 @@ def main():
         "--visible-browser",
         action="store_true",
         help="Run browser in visible mode (non-headless). This is harder to detect but requires a display.",
+    )
+    run_parser.add_argument(
+        "--no-auto-submit",
+        action="store_true",
+        help="Disable automatic submission. Solutions will be marked as 'submitting' and can be exported for manual browser submission.",
     )
 
     args = parser.parse_args()

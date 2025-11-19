@@ -79,66 +79,77 @@ fn main() {
         ((num_cores as f64 * 0.8).floor() as usize).max(1)
     });
 
+    // --- Check GPU Availability ---
+    let gpu_available = MetalAshmaize::new();
+    if gpu_available.is_none() {
+        eprintln!("Warning: Metal GPU not available. Mining will use CPU only.");
+    }
+
     thread::scope(|s| {
-        // --- Spawn GPU Worker Thread ---
-        s.spawn({
-            let winning_nonce = Arc::clone(&winning_nonce);
-            let light_rom = Arc::clone(&light_rom);
-            let suffix = Arc::clone(&suffix);
-            move || {
-                eprintln!("Starting GPU mining from nonce {}...", GPU_NONCE_START);
-                let metal = MetalAshmaize::new().expect("Failed to initialize Metal GPU");
-                let mut current_nonce = GPU_NONCE_START;
+        // --- Spawn GPU Worker Thread (only if GPU is available) ---
+        if let Some(metal) = gpu_available {
+            s.spawn({
+                let winning_nonce = Arc::clone(&winning_nonce);
+                let light_rom = Arc::clone(&light_rom);
+                let suffix = Arc::clone(&suffix);
+                move || {
+                    eprintln!("Starting GPU mining from nonce {}...", GPU_NONCE_START);
+                    let mut current_nonce = GPU_NONCE_START;
 
-                loop {
-                    // Stop if another thread has found a solution
-                    if winning_nonce.load(Ordering::Relaxed) != u64::MAX {
-                        break;
-                    }
-
-                    let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(GPU_BATCH_SIZE);
-                    for i in 0..GPU_BATCH_SIZE {
-                        preimages.push(
-                            format!("{:016x}{}", current_nonce + i as u64, &*suffix).into_bytes(),
-                        );
-                    }
-
-                    let preimage_slices: Vec<&[u8]> =
-                        preimages.iter().map(|p| p.as_slice()).collect();
-                    let hash_results = metal
-                        .hash(&preimage_slices, &*light_rom, 8, 256)
-                        .expect("GPU hashing failed");
-
-                    let mut found_in_batch = false;
-                    for (i, hash_result) in hash_results.iter().enumerate() {
-                        if hash_structure_good(hash_result, difficulty_mask) {
-                            let found_nonce = current_nonce + i as u64;
-                            // Atomically try to set the winning nonce.
-                            if winning_nonce
-                                .compare_exchange(
-                                    u64::MAX,
-                                    found_nonce,
-                                    Ordering::SeqCst,
-                                    Ordering::Relaxed,
-                                )
-                                .is_ok()
-                            {
-                                eprintln!("\nSolution found by GPU at nonce: {:016x}", found_nonce);
-                            }
-                            // A solution is found (either by us or another thread). Stop work.
-                            found_in_batch = true;
+                    loop {
+                        // Stop if another thread has found a solution
+                        if winning_nonce.load(Ordering::Relaxed) != u64::MAX {
                             break;
                         }
-                    }
 
-                    if found_in_batch {
-                        break; // Exit the main GPU loop
-                    }
+                        let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(GPU_BATCH_SIZE);
+                        for i in 0..GPU_BATCH_SIZE {
+                            preimages.push(
+                                format!("{:016x}{}", current_nonce + i as u64, &*suffix)
+                                    .into_bytes(),
+                            );
+                        }
 
-                    current_nonce += GPU_BATCH_SIZE as u64;
+                        let preimage_slices: Vec<&[u8]> =
+                            preimages.iter().map(|p| p.as_slice()).collect();
+                        let hash_results = metal
+                            .hash(&preimage_slices, &*light_rom, 8, 256)
+                            .expect("GPU hashing failed");
+
+                        let mut found_in_batch = false;
+                        for (i, hash_result) in hash_results.iter().enumerate() {
+                            if hash_structure_good(hash_result, difficulty_mask) {
+                                let found_nonce = current_nonce + i as u64;
+                                // Atomically try to set the winning nonce.
+                                if winning_nonce
+                                    .compare_exchange(
+                                        u64::MAX,
+                                        found_nonce,
+                                        Ordering::SeqCst,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok()
+                                {
+                                    eprintln!(
+                                        "\nSolution found by GPU at nonce: {:016x}",
+                                        found_nonce
+                                    );
+                                }
+                                // A solution is found (either by us or another thread). Stop work.
+                                found_in_batch = true;
+                                break;
+                            }
+                        }
+
+                        if found_in_batch {
+                            break; // Exit the main GPU loop
+                        }
+
+                        current_nonce += GPU_BATCH_SIZE as u64;
+                    }
                 }
-            }
-        });
+            });
+        }
         // --- Run CPU Workers on Main Thread using Rayon ---
         eprintln!("Starting CPU mining with {} threads...", num_cpu_threads);
         let pool = rayon::ThreadPoolBuilder::new()

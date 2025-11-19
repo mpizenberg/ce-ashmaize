@@ -43,12 +43,17 @@ SESSION_INIT_URL = "https://sm.midnight.gd/"
 browser = None
 
 
-def initialize_session():
-    """Initialize Playwright browser session with cookies."""
+def initialize_session(headless=True):
+    """Initialize Playwright browser session with cookies.
+
+    Args:
+        headless: Whether to run browser in headless mode. Non-headless is harder to detect.
+    """
     global browser
     try:
         logging.info(f"Initializing browser session with {SESSION_INIT_URL}...")
-        browser = get_browser_session(headless=True)
+        logging.info(f"Browser mode: {'headless' if headless else 'non-headless (visible)'}")
+        browser = get_browser_session(headless=headless)
         browser.initialize(SESSION_INIT_URL)
         logging.info("Browser session initialized successfully with cookies.")
     except Exception as e:
@@ -72,9 +77,15 @@ def setup_logging():
 
 
 # --- Anti-Bot Detection Helpers ---
-def add_human_delay(min_delay=0.5, max_delay=2.0):
-    """Add a random delay to simulate human behavior and avoid bot detection."""
+def add_human_delay(min_delay=1.0, max_delay=3.0):
+    """Add a random delay to simulate human behavior and avoid bot detection.
+
+    Uses a more realistic delay pattern with occasional longer pauses.
+    """
     delay = random.uniform(min_delay, max_delay)
+    # 15% chance of a longer pause to simulate reading/thinking
+    if random.random() < 0.15:
+        delay += random.uniform(2.0, 4.0)
     time.sleep(delay)
 
 
@@ -369,10 +380,10 @@ class DatabaseManager:
 # They accept a `tui_app` object to post messages back to the UI thread.
 
 
-def fetcher_worker(db_manager, stop_event, tui_app):
+def fetcher_worker(db_manager, stop_event, tui_app, headless=True):
     tui_app.post_message(LogMessage("Fetcher thread started."))
     # Re-initialize session to ensure fresh cookies
-    initialize_session()
+    initialize_session(headless=headless)
     while not stop_event.is_set():
         tui_app.post_message(LogMessage("Fetching new challenges..."))
         addresses = db_manager.get_addresses()
@@ -908,7 +919,8 @@ def run_orchestrator(args):
     logging.info("Starting orchestrator TUI...")
 
     # Initialize session with cookies before starting workers
-    initialize_session()
+    headless = not args.visible_browser if hasattr(args, 'visible_browser') else True
+    initialize_session(headless=headless)
 
     db_manager = DatabaseManager()
 
@@ -927,6 +939,7 @@ def run_orchestrator(args):
         "cpu_threads": args.cpu_threads,
         "challenge_selection": args.challenge_selection,
         "gpu": args.gpu,
+        "headless": headless,
     }
 
     app = OrchestratorTUI(
@@ -990,6 +1003,11 @@ def main():
         "--gpu",
         action="store_true",
         help="Enable GPU mining (macOS only).",
+    )
+    run_parser.add_argument(
+        "--visible-browser",
+        action="store_true",
+        help="Run browser in visible mode (non-headless). This is harder to detect but requires a display.",
     )
 
     args = parser.parse_args()

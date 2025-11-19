@@ -10,6 +10,37 @@ import time
 import threading
 from queue import Queue
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+from playwright_stealth import Stealth
+
+
+# Randomization data for realistic fingerprinting
+USER_AGENTS = [
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+]
+
+VIEWPORTS = [
+    {'width': 1920, 'height': 1080},
+    {'width': 1920, 'height': 1200},
+    {'width': 2560, 'height': 1440},
+    {'width': 1680, 'height': 1050},
+    {'width': 1440, 'height': 900},
+]
+
+TIMEZONES = [
+    'America/New_York',
+    'America/Chicago',
+    'America/Los_Angeles',
+    'America/Denver',
+    'Europe/London',
+]
+
+LOCALES = [
+    'en-US',
+    'en-GB',
+]
 
 
 class BrowserSession:
@@ -28,7 +59,17 @@ class BrowserSession:
         try:
             logging.info("Starting Playwright browser in separate thread...")
             with sync_playwright() as playwright:
+                # Randomize fingerprint for each session
+                user_agent = random.choice(USER_AGENTS)
+                viewport = random.choice(VIEWPORTS)
+                timezone = random.choice(TIMEZONES)
+                locale = random.choice(LOCALES)
+
+                logging.info(f"Using User-Agent: {user_agent[:50]}...")
+                logging.info(f"Using Viewport: {viewport}")
+
                 # Launch Chromium with realistic settings
+                # Use new headless mode (headless=new) which is harder to detect
                 browser = playwright.chromium.launch(
                     headless=self.headless,
                     args=[
@@ -36,27 +77,50 @@ class BrowserSession:
                         '--disable-dev-shm-usage',
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
+                        '--disable-web-security',
+                        '--disable-features=IsolateOrigins,site-per-process',
+                        '--no-first-run',
+                        '--no-default-browser-check',
+                        '--disable-infobars',
+                        '--window-size={},{}'.format(viewport['width'], viewport['height']),
                     ]
                 )
 
-                # Create context with realistic viewport and user agent
+                # Create context with randomized viewport and user agent
                 context = browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    locale='en-US',
-                    timezone_id='America/New_York',
+                    viewport=viewport,
+                    user_agent=user_agent,
+                    locale=locale,
+                    timezone_id=timezone,
+                    # Add extra HTTP headers to appear more realistic
+                    extra_http_headers={
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Cache-Control': 'max-age=0',
+                    }
                 )
 
-                # Additional stealth settings
+                # Enhanced stealth settings - comprehensive fingerprint evasion
                 context.add_init_script("""
                     // Override navigator.webdriver
                     Object.defineProperty(navigator, 'webdriver', {
                         get: () => false,
                     });
 
-                    // Add chrome runtime
+                    // Add chrome runtime (critical for passing bot detection)
                     window.chrome = {
                         runtime: {},
+                        loadTimes: function() {},
+                        csi: function() {},
+                        app: {},
                     };
 
                     // Override permissions
@@ -66,16 +130,121 @@ class BrowserSession:
                             Promise.resolve({ state: Notification.permission }) :
                             originalQuery(parameters)
                     );
+
+                    // Randomize canvas fingerprint
+                    const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+                    HTMLCanvasElement.prototype.toDataURL = function(type) {
+                        const result = originalToDataURL.apply(this, arguments);
+                        // Add slight noise to canvas fingerprint
+                        return result.replace(/.$/, String.fromCharCode(result.charCodeAt(result.length - 1) + Math.floor(Math.random() * 3)));
+                    };
+
+                    // Randomize WebGL fingerprint
+                    const getParameter = WebGLRenderingContext.prototype.getParameter;
+                    WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                        if (parameter === 37445) { // UNMASKED_VENDOR_WEBGL
+                            return 'Intel Inc.';
+                        }
+                        if (parameter === 37446) { // UNMASKED_RENDERER_WEBGL
+                            return 'Intel Iris OpenGL Engine';
+                        }
+                        return getParameter.apply(this, arguments);
+                    };
+
+                    // Override plugin detection
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [
+                            {
+                                name: 'Chrome PDF Plugin',
+                                filename: 'internal-pdf-viewer',
+                                description: 'Portable Document Format',
+                            },
+                            {
+                                name: 'Chrome PDF Viewer',
+                                filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai',
+                                description: '',
+                            },
+                            {
+                                name: 'Native Client',
+                                filename: 'internal-nacl-plugin',
+                                description: '',
+                            }
+                        ],
+                    });
+
+                    // Override languages
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en'],
+                    });
+
+                    // Override platform (randomize between common platforms)
+                    Object.defineProperty(navigator, 'platform', {
+                        get: () => 'MacIntel',
+                    });
+
+                    // Override hardwareConcurrency (randomize)
+                    Object.defineProperty(navigator, 'hardwareConcurrency', {
+                        get: () => """ + str(random.choice([4, 8, 12, 16])) + """,
+                    });
+
+                    // Override deviceMemory (randomize)
+                    Object.defineProperty(navigator, 'deviceMemory', {
+                        get: () => """ + str(random.choice([4, 8, 16])) + """,
+                    });
+
+                    // Override battery API
+                    if (navigator.getBattery) {
+                        navigator.getBattery = () => Promise.resolve({
+                            charging: true,
+                            chargingTime: 0,
+                            dischargingTime: Infinity,
+                            level: 1,
+                        });
+                    }
+
+                    // Add realistic timing jitter
+                    const originalDateNow = Date.now;
+                    Date.now = function() {
+                        return originalDateNow() + Math.floor(Math.random() * 5);
+                    };
+
+                    // Mask automation in performance.timing
+                    Object.defineProperty(window.performance.timing, 'navigationStart', {
+                        get: () => Date.now() - Math.floor(Math.random() * 10000 + 5000),
+                    });
                 """)
 
                 page = context.new_page()
+
+                # Apply playwright-stealth for comprehensive bot detection evasion
+                # This automatically patches dozens of detection vectors
+                logging.info("Applying playwright-stealth patches...")
+                stealth = Stealth()
+                stealth.apply_stealth_sync(page)
 
                 # Visit the init URL to establish session cookies
                 logging.info(f"Initializing session by visiting {init_url}")
                 page.goto(init_url, wait_until='networkidle', timeout=30000)
 
-                # Add random delay to appear more human
-                time.sleep(random.uniform(1.0, 3.0))
+                # Add random delay to appear more human (longer initial delay)
+                initial_delay = random.uniform(2.0, 5.0)
+                logging.info(f"Waiting {initial_delay:.2f}s to simulate human browsing...")
+                time.sleep(initial_delay)
+
+                # Simulate some human-like behavior on the initial page
+                try:
+                    # Random scroll to appear more human
+                    page.evaluate("""
+                        () => {
+                            window.scrollTo({
+                                top: Math.random() * 500,
+                                behavior: 'smooth'
+                            });
+                        }
+                    """)
+                    time.sleep(random.uniform(0.3, 0.8))
+                except:
+                    pass  # Ignore errors if page doesn't support scrolling
 
                 logging.info("Browser session initialized successfully")
                 self._initialized = True
@@ -93,8 +262,13 @@ class BrowserSession:
                         url = request['url']
                         timeout = request.get('timeout', 30000)
 
-                        # Add human-like delay before request
-                        time.sleep(random.uniform(0.5, 2.0))
+                        # Add human-like delay before request (more variation)
+                        # Use exponential distribution for more realistic timing
+                        base_delay = random.uniform(1.0, 3.0)
+                        # Occasionally add a longer pause (10% chance)
+                        if random.random() < 0.1:
+                            base_delay += random.uniform(2.0, 5.0)
+                        time.sleep(base_delay)
 
                         response_data = None
                         error = None

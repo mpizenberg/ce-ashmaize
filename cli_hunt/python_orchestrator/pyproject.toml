@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "curl-cffi>=0.13.0",
     "playwright>=1.56.0",
+    "playwright-stealth>=2.0.0",
     "requests",
     "textual>=6.4.0",
 ]

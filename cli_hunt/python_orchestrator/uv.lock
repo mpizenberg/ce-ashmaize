@@ -352,6 +352,18 @@ wheels = [
 ]
 
 [[package]]
+name = "playwright-stealth"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "playwright" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b0/50/e008cc2d9f01e351d69f0bb0f394882c517611eec0ee3d5f8dd8535ce719/playwright_stealth-2.0.0.tar.gz", hash = "sha256:4f44d416d4226689895a4d1cfb40e8d137216c0c9710ea8f84bae2dbf1186fc5", size = 25723, upload-time = "2025-06-18T03:54:54.528Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b9/4e/c37ac19cea166a97de3a9690ad5ba340b3f4f4fcd5bf8237cedb2c2c7076/playwright_stealth-2.0.0-py3-none-any.whl", hash = "sha256:9eb3af1fd21619aac9fdd13a4a08141ed67159ac6310a94f7d2f758ba0cbe179", size = 32466, upload-time = "2025-06-18T03:54:53.394Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "2.23"
 source = { registry = "https://pypi.org/simple" }
@@ -388,6 +400,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "curl-cffi" },
     { name = "playwright" },
+    { name = "playwright-stealth" },
     { name = "requests" },
     { name = "textual" },
 ]
@@ -396,6 +409,7 @@ dependencies = [
 requires-dist = [
     { name = "curl-cffi", specifier = ">=0.13.0" },
     { name = "playwright", specifier = ">=1.56.0" },
+    { name = "playwright-stealth", specifier = ">=2.0.0" },
     { name = "requests" },
     { name = "textual", specifier = ">=6.4.0" },
 ]

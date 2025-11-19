@@ -19,8 +19,10 @@ pub struct MetalAshmaize {
     finalize_pipeline_state: ComputePipelineState,
 }
 
-type VmInitResult = Result<([u64; crate::b2::NB_REGS], u32, [u8; 64], u32, u32), Box<dyn std::error::Error>>;
-type PostInstructionsResult = Result<([u64; crate::b2::NB_REGS], [u8; 64], u32), Box<dyn std::error::Error>>;
+type VmInitResult =
+    Result<([u64; crate::b2::NB_REGS], u32, [u8; 64], u32, u32), Box<dyn std::error::Error>>;
+type PostInstructionsResult =
+    Result<([u64; crate::b2::NB_REGS], [u8; 64], u32), Box<dyn std::error::Error>>;
 
 impl MetalAshmaize {
     // Instrumentation Metrics (must match ashmaize.metal)
@@ -621,12 +623,7 @@ impl MetalAshmaize {
     }
 
     /// Tests the `vm_init` logic on the GPU
-    pub fn test_vm_init_kernel(
-        &self,
-        rom_digest: &[u8; 64],
-        salt: &[u8],
-    ) -> VmInitResult
-    {
+    pub fn test_vm_init_kernel(&self, rom_digest: &[u8; 64], salt: &[u8]) -> VmInitResult {
         // Input buffers
         let rom_digest_buffer = self.device.new_buffer_with_data(
             rom_digest.as_ptr() as *const c_void,

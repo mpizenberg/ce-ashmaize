@@ -14,7 +14,7 @@ pub const MB: usize = 1024 * 1024;
 pub const GB: usize = 1024 * MB;
 
 #[cfg(target_os = "macos")]
-const GPU_BATCH_SIZE: usize = 10000;
+const GPU_BATCH_SIZE: usize = 50000;
 #[cfg(target_os = "macos")]
 const GPU_NONCE_START: u64 = 1 << 52; // Start GPU mining from a high nonce to avoid collision with CPU
 

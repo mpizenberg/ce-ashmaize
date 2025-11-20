@@ -1319,9 +1319,13 @@ mod tests {
         let light_rom = full_rom.shrink();
         let metal_ashmaize = MetalAshmaize::new().expect("MetalAshmaize initialization failed");
 
+        let suffix = "addr_test1qq4dl3nhr0axurgcrpun9xyp04pd2r2dwu5x
+        7eeam98psv6dhxlde8ucclv2p46hm077ds4vzelf5565fg3ky794uhrq5up0he*
+        *D07C10000FFFFFfd651ac2725e3b9d804cc8b161c0709af14d6264f93e8d4a
+        fef0fd1142a3f0112025-10-19T08:59:59.000Z509681483";
         let max_batch_size = *batch_sizes.iter().max().unwrap_or(&0);
         let salts: Vec<Vec<u8>> = (0..max_batch_size)
-            .map(|i| format!("salt_{}", i).into_bytes())
+            .map(|i| format!("{:016x}{}", i as u64, suffix).into_bytes())
             .collect();
 
         // Pad salts to the same length for the GPU implementation

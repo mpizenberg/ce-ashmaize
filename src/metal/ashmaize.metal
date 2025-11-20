@@ -150,18 +150,7 @@ void blake2b_update(thread Blake2bState &S, thread const uint8_t *in, uint64_t i
             S.t[0] += BLAKE2B_BLOCKBYTES;
             if (S.t[0] < BLAKE2B_BLOCKBYTES) S.t[1]++;
 
-            uint64_t m[16];
-            for (uint i = 0; i < 16; ++i) {
-                m[i] = ((uint64_t)S.buf[i * 8 + 0] << 0) |
-                       ((uint64_t)S.buf[i * 8 + 1] << 8) |
-                       ((uint64_t)S.buf[i * 8 + 2] << 16) |
-                       ((uint64_t)S.buf[i * 8 + 3] << 24) |
-                       ((uint64_t)S.buf[i * 8 + 4] << 32) |
-                       ((uint64_t)S.buf[i * 8 + 5] << 40) |
-                       ((uint64_t)S.buf[i * 8 + 6] << 48) |
-                       ((uint64_t)S.buf[i * 8 + 7] << 56);
-            }
-
+            thread const uint64_t* m = (thread const uint64_t*)S.buf;
             blake2b_round(S, m, instrumentation_buffer);
 
             current_in += fill;
@@ -190,18 +179,7 @@ void blake2b_final(thread Blake2bState &S, thread uint8_t *out, uint outlen, dev
             S.buf[i] = 0;
         }
 
-        uint64_t m[16];
-        for (uint i = 0; i < 16; ++i) {
-            m[i] = ((uint64_t)S.buf[i * 8 + 0] << 0) |
-                   ((uint64_t)S.buf[i * 8 + 1] << 8) |
-                   ((uint64_t)S.buf[i * 8 + 2] << 16) |
-                   ((uint64_t)S.buf[i * 8 + 3] << 24) |
-                   ((uint64_t)S.buf[i * 8 + 4] << 32) |
-                   ((uint64_t)S.buf[i * 8 + 5] << 40) |
-                   ((uint64_t)S.buf[i * 8 + 6] << 48) |
-                   ((uint64_t)S.buf[i * 8 + 7] << 56);
-        }
-
+        thread const uint64_t* m = (thread const uint64_t*)S.buf;
         blake2b_round(S, m, instrumentation_buffer);
     }
 
@@ -337,16 +315,9 @@ void vm_init(thread VMState &vm, thread const uint8_t *rom_digest, uint32_t rom_
            init_buffer_input, rom_digest_len + salt_len, instrumentation_buffer);
 
     // Initialize registers from first part of init_buffer
-    thread const uint8_t *init_buffer_regs = init_buffer;
+    thread const uint64_t *init_buffer_regs = (thread const uint64_t *)init_buffer;
     for (uint i = 0; i < NB_REGS; ++i) {
-        vm.regs[i] = ((uint64_t)init_buffer_regs[i * 8 + 0] << 0) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 1] << 8) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 2] << 16) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 3] << 24) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 4] << 32) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 5] << 40) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 6] << 48) |
-                     ((uint64_t)init_buffer_regs[i * 8 + 7] << 56);
+        vm.regs[i] = init_buffer_regs[i];
     }
 
     // Initialize digests from remaining buffer
@@ -439,11 +410,7 @@ inline uint64_t special_value64(thread Blake2bState &digest, device atomic_uint 
     thread Blake2bState S = digest;
     uint8_t out[64];
     blake2b_final(S, out, 64, instrumentation_buffer);
-    uint64_t v = 0ull;
-    for (int i = 0; i < 8; ++i) {
-        v |= (uint64_t)out[i] << (8 * i);
-    }
-    return v;
+    return *((thread uint64_t*)out);
 }
 inline uint64_t special1_value64(thread VMState &vm, device atomic_uint *instrumentation_buffer) {
     if (vm.special1_valid) {
@@ -538,13 +505,10 @@ void execute_one_instruction(thread VMState &vm,
 
     // --- decode literals lit1 and lit2 (little-endian u64 from prog_chunk[4..12], [12..20]) ---
     // Rust uses from_le_bytes on slices. We'll reconstruct little-endian.
-    uint64_t lit1 = 0;
-    uint64_t lit2 = 0;
-    // bytes 4..12
-    for (int i = 0; i < 8; ++i) {
-        lit1 |= ((uint64_t)prog_chunk[4 + i]) << (8 * i);
-        lit2 |= ((uint64_t)prog_chunk[12 + i]) << (8 * i);
-    }
+    thread const uint64_t* lit1_ptr = (thread const uint64_t*)(prog_chunk + 4);
+    thread const uint64_t* lit2_ptr = (thread const uint64_t*)(prog_chunk + 12);
+    uint64_t lit1 = *lit1_ptr;
+    uint64_t lit2 = *lit2_ptr;
 
     // Corresponds to Rust macro mem_access64!(vm, rom, addr)
     auto mem_access64 = [&](thread VMState &vref, device const uint8_t *rom_p, uint64_t addr) -> uint64_t {
@@ -796,15 +760,8 @@ void post_instructions(thread VMState &vm, device atomic_uint *instrumentation_b
     for (uint32_t block_idx = 0; block_idx < 32; ++block_idx) { // 32 blocks as per Rust implementation
         thread const uint8_t *current_block_ptr = mixing_out + (block_idx * NB_REGS * REGISTER_SIZE);
         for (uint32_t reg_idx = 0; reg_idx < NB_REGS; ++reg_idx) {
-            uint64_t mix_val = ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 0] << 0) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 1] << 8) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 2] << 16) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 3] << 24) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 4] << 32) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 5] << 40) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 6] << 48) |
-                               ((uint64_t)current_block_ptr[reg_idx * REGISTER_SIZE + 7] << 56);
-            vm.regs[reg_idx] ^= mix_val;
+            thread const uint64_t* mix_val_ptr = (thread const uint64_t*)(current_block_ptr + reg_idx * REGISTER_SIZE);
+            vm.regs[reg_idx] ^= *mix_val_ptr;
         }
     }
 

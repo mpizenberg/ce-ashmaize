@@ -56,6 +56,15 @@ constant uint64_t blake2b_IV[8] = {
     0x1f83d9abfb41bd6b, 0x5be0cd19137e2179
 };
 
+inline uint64_t rotate_left_u64(uint64_t v, uint32_t s) {
+    s &= 63;
+    return (v << s) | (v >> ((64 - s) & 63));
+}
+inline uint64_t rotate_right_u64(uint64_t v, uint32_t s) {
+    s &= 63;
+    return (v >> s) | (v << ((64 - s) & 63));
+}
+
 struct Blake2bState {
     uint64_t h[8];
     uint64_t t[2];   // counters
@@ -65,57 +74,16 @@ struct Blake2bState {
     bool last_node;
 };
 
-// G Mixing function for Blake2b (operates on 4 state words directly)
-// Vectorized G function - processes 4 G calls in parallel
-void blake2b_G_4x(thread uint64_t *v, int idx0, int idx1, int idx2, int idx3,
-                  int idx4, int idx5, int idx6, int idx7,
-                  int idx8, int idx9, int idx10, int idx11,
-                  int idx12, int idx13, int idx14, int idx15,
-                  thread const uint64_t *m, int m_idx) {
-    // Load 4 sets of a, b, c, d values into vectors
-    ulong4 a = {v[idx0], v[idx1], v[idx2], v[idx3]};
-    ulong4 b = {v[idx4], v[idx5], v[idx6], v[idx7]};
-    ulong4 c = {v[idx8], v[idx9], v[idx10], v[idx11]};
-    ulong4 d = {v[idx12], v[idx13], v[idx14], v[idx15]};
-    ulong4 x = {m[SIGMA[m_idx + 0]], m[SIGMA[m_idx + 2]], m[SIGMA[m_idx + 4]], m[SIGMA[m_idx + 6]]};
-    ulong4 y = {m[SIGMA[m_idx + 1]], m[SIGMA[m_idx + 3]], m[SIGMA[m_idx + 5]], m[SIGMA[m_idx + 7]]};
-
-    // Step 1: a = a + b + x; d = rotr64(d ^ a, 32)
-    a = a + b + x;
-    d = d ^ a;
-    d = (d >> 32) | (d << 32);
-
-    // Step 2: c = c + d; b = rotr64(b ^ c, 24)
-    c = c + d;
-    b = b ^ c;
-    b = (b >> 24) | (b << 40);
-
-    // Step 3: a = a + b + y; d = rotr64(d ^ a, 16)
-    a = a + b + y;
-    d = d ^ a;
-    d = (d >> 16) | (d << 48);
-
-    // Step 4: c = c + d; b = rotr64(b ^ c, 63)
-    c = c + d;
-    b = b ^ c;
-    b = (b >> 63) | (b << 1);
-
-    // Write back
-    v[idx0] = a.x; v[idx1] = a.y; v[idx2] = a.z; v[idx3] = a.w;
-    v[idx4] = b.x; v[idx5] = b.y; v[idx6] = b.z; v[idx7] = b.w;
-    v[idx8] = c.x; v[idx9] = c.y; v[idx10] = c.z; v[idx11] = c.w;
-    v[idx12] = d.x; v[idx13] = d.y; v[idx14] = d.z; v[idx15] = d.w;
-}
-
-void blake2b_G(thread uint64_t &a, thread uint64_t &b, thread uint64_t &c, thread uint64_t &d, uint64_t x, uint64_t y) {
-    a = a + b + x;
-    d = (d ^ a); d = (d >> 32) | (d << 32); // ROTR 32
-    c = c + d;
-    b = (b ^ c); b = (b >> 24) | (b << 40); // ROTR 24
-    a = a + b + y;
-    d = (d ^ a); d = (d >> 16) | (d << 48); // ROTR 16
-    c = c + d;
-    b = (b ^ c); b = (b >> 63) | (b << 1); // ROTR 63 (ROL 1)
+// G Mixing function for Blake2b
+void blake2b_G(thread uint64_t *v, int a, int b, int c, int d, uint64_t x, uint64_t y) {
+    v[a] = v[a] + v[b] + x;
+    v[d] = rotate_right_u64(v[d] ^ v[a], 32);
+    v[c] = v[c] + v[d];
+    v[b] = rotate_right_u64(v[b] ^ v[c], 24);
+    v[a] = v[a] + v[b] + y;
+    v[d] = rotate_right_u64(v[d] ^ v[a], 16);
+    v[c] = v[c] + v[d];
+    v[b] = rotate_right_u64(v[b] ^ v[c], 63);
 }
 
 // Round function for Blake2b
@@ -135,23 +103,17 @@ void blake2b_round(thread Blake2bState &S, thread const uint64_t *m, device atom
     v[14] ^= S.f[0];
     v[15] ^= S.f[1];
 
-    // 12 rounds - use vectorized G for columns and diagonals
+    // 12 rounds
     for (int r = 0; r < 12; ++r) {
-        uint s_idx = (r % 10) * 16; // Index into SIGMA for current round permutation
-
-        // Process 4 columns in parallel
-        blake2b_G_4x(v, 0, 1, 2, 3,  // a indices
-                        4, 5, 6, 7,  // b indices
-                        8, 9, 10, 11, // c indices
-                        12, 13, 14, 15, // d indices
-                        m, s_idx);
-
-        // Process 4 diagonals in parallel
-        blake2b_G_4x(v, 0, 1, 2, 3,  // a indices
-                        5, 6, 7, 4,  // b indices (note rotation)
-                        10, 11, 8, 9, // c indices (note rotation)
-                        15, 12, 13, 14, // d indices (note rotation)
-                        m, s_idx + 8);
+        uint s_idx = (r % 10) * 16;
+        blake2b_G(v, 0, 4, 8,  12, m[SIGMA[s_idx + 0]], m[SIGMA[s_idx + 1]]);
+        blake2b_G(v, 1, 5, 9,  13, m[SIGMA[s_idx + 2]], m[SIGMA[s_idx + 3]]);
+        blake2b_G(v, 2, 6, 10, 14, m[SIGMA[s_idx + 4]], m[SIGMA[s_idx + 5]]);
+        blake2b_G(v, 3, 7, 11, 15, m[SIGMA[s_idx + 6]], m[SIGMA[s_idx + 7]]);
+        blake2b_G(v, 0, 5, 10, 15, m[SIGMA[s_idx + 8]], m[SIGMA[s_idx + 9]]);
+        blake2b_G(v, 1, 6, 11, 12, m[SIGMA[s_idx + 10]], m[SIGMA[s_idx + 11]]);
+        blake2b_G(v, 2, 7, 8,  13, m[SIGMA[s_idx + 12]], m[SIGMA[s_idx + 13]]);
+        blake2b_G(v, 3, 4, 9,  14, m[SIGMA[s_idx + 14]], m[SIGMA[s_idx + 15]]);
     }
 
     // Update chaining value S.h with compressed state
@@ -449,15 +411,6 @@ inline device const uint8_t* rom_at(device const uint8_t *rom,
     // We return rom + offset. The Rust implementation would panic if offset+64 > len,
     // but Metal cannot panic similarly — caller must ensure rom_size is large enough.
     return rom + offset;
-}
-
-inline uint64_t rotate_left_u64(uint64_t v, uint32_t s) {
-    s &= 63;
-    return (v << s) | (v >> ((64 - s) & 63));
-}
-inline uint64_t rotate_right_u64(uint64_t v, uint32_t s) {
-    s &= 63;
-    return (v >> s) | (v << ((64 - s) & 63));
 }
 
 // integer isqrt (returns floor(sqrt(x))) - matches typical integer sqrt semantics.

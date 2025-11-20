@@ -384,6 +384,44 @@ inline device const uint8_t* rom_at(device const uint8_t *rom,
     return rom + offset;
 }
 
+// Append exactly 64 bytes from a device pointer into the Blake2b state buffer,
+// performing a compress when the buffer overflows. Mirrors the logic in blake2b_update
+// but avoids staging and generic path overhead for the fixed 64-byte case.
+inline void blake2b_append_64_from_device(thread Blake2bState &S,
+                                          device const uint8_t *src,
+                                          device atomic_uint *instrumentation_buffer) {
+    uint64_t left = S.buflen;
+    uint64_t fill = BLAKE2B_BLOCKBYTES - left;
+
+    if (64 > fill) {
+        // Fill the remainder of the buffer and compress
+        for (uint i = 0; i < fill; ++i) {
+            S.buf[left + i] = src[i];
+        }
+        S.buflen += fill;
+
+        S.t[0] += BLAKE2B_BLOCKBYTES;
+        if (S.t[0] < BLAKE2B_BLOCKBYTES) S.t[1]++;
+
+        thread const uint64_t* m = (thread const uint64_t*)S.buf;
+        blake2b_round(S, m, instrumentation_buffer);
+
+        // Start a new buffer with the leftover bytes
+        S.buflen = 0;
+        uint32_t rem = 64 - fill;
+        for (uint i = 0; i < rem; ++i) {
+            S.buf[i] = src[fill + i];
+        }
+        S.buflen += rem;
+    } else {
+        // Enough space to append 64 bytes without compressing
+        for (uint i = 0; i < 64; ++i) {
+            S.buf[left + i] = src[i];
+        }
+        S.buflen += 64;
+    }
+}
+
 // integer isqrt (returns floor(sqrt(x))) - matches typical integer sqrt semantics.
 // Rust used src1.isqrt(); implement deterministic equivalent in Metal.
 inline uint64_t int_isqrt(uint64_t x) {
@@ -513,23 +551,18 @@ void execute_one_instruction(thread VMState &vm,
     // Corresponds to Rust macro mem_access64!(vm, rom, addr)
     auto mem_access64 = [&](thread VMState &vref, device const uint8_t *rom_p, uint64_t addr) -> uint64_t {
         device const uint8_t *mem = rom_at(rom, rom_size, (uint32_t)addr, instrumentation_buffer);
-        uint8_t mem_chunk[64];
-        // Copy 64 bytes - keep original byte-by-byte copy for correctness
-        for (uint32_t i = 0; i < 64; ++i) {
-            mem_chunk[i] = mem[i];
-        }
-        // update mem_digest_state with entire 64-byte chunk
-        blake2b_update(vm.mem_digest_state, mem_chunk, 64, instrumentation_buffer);
+        // update mem_digest_state with entire 64-byte chunk (avoid staging and generic update)
+        blake2b_append_64_from_device(vm.mem_digest_state, mem, instrumentation_buffer);
         // Invalidate special2 cache after mem_digest update
         vm.special2_valid = false;
         // increment memory_counter (wrapping)
         vm.memory_counter = vm.memory_counter + 1; // wrapping in metal C++ will behave but make sure vm.memory_counter is uint64
         // compute index chunk
         uint32_t idx = (uint32_t)(((vm.memory_counter) & 7u) << 3); // ((vm.memory_counter % (64u / 8u)) * 8u)
-        // read little-endian u64 from mem_chunk[idx..idx+8]
+        // read little-endian u64 directly from device memory mem[idx..idx+8]
         uint64_t out = 0;
         for (int i = 0; i < 8; ++i) {
-            out |= (uint64_t)mem_chunk[idx + i] << (8 * i);
+            out |= (uint64_t)mem[idx + i] << (8 * i);
         }
         return out;
     };

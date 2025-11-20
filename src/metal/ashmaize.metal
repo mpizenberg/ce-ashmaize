@@ -372,7 +372,7 @@ inline device const uint8_t* rom_at(device const uint8_t *rom,
 {
     INSTRUMENT_INC(instrumentation_buffer, METRIC_ROM_ACCESS_COUNT);
     // avoid division by zero if rom_size < 64: in Rust that would panic on / 0; here we defensively treat blocks=0 -> start=0
-    uint32_t blocks = (rom_size / DATASET_ACCESS_SIZE);
+    uint32_t blocks = (rom_size >> 6); // (rom_size / DATASET_ACCESS_SIZE)
     uint32_t start = (blocks == 0) ? 0u : (i % blocks);
 
     // IMPORTANT: replicates the Rust code that uses `start` directly (byte index),
@@ -525,7 +525,7 @@ void execute_one_instruction(thread VMState &vm,
         // increment memory_counter (wrapping)
         vm.memory_counter = vm.memory_counter + 1; // wrapping in metal C++ will behave but make sure vm.memory_counter is uint64
         // compute index chunk
-        uint32_t idx = (uint32_t)((vm.memory_counter % (64u / 8u)) * 8u);
+        uint32_t idx = (uint32_t)(((vm.memory_counter) & 7u) << 3); // ((vm.memory_counter % (64u / 8u)) * 8u)
         // read little-endian u64 from mem_chunk[idx..idx+8]
         uint64_t out = 0;
         for (int i = 0; i < 8; ++i) {

@@ -706,17 +706,7 @@ void execute_one_instruction(thread VMState &vm,
                 break;
             }
             case BitRev: {
-                // reverse bits, same as Rust u64.reverse_bits()
-                // Implement via builtin or manual loop
-                uint64_t x = src1;
-                // Use typical bit-reversal algorithm (swap halves progressively)
-                x = ((x & 0x5555555555555555ULL) << 1) | ((x >> 1) & 0x5555555555555555ULL);
-                x = ((x & 0x3333333333333333ULL) << 2) | ((x >> 2) & 0x3333333333333333ULL);
-                x = ((x & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((x >> 4) & 0x0F0F0F0F0F0F0F0FULL);
-                x = ((x & 0x00FF00FF00FF00FFULL) << 8) | ((x >> 8) & 0x00FF00FF00FF00FFULL);
-                x = ((x & 0x0000FFFF0000FFFFULL) << 16) | ((x >> 16) & 0x0000FFFF0000FFFFULL);
-                x = (x << 32) | (x >> 32);
-                result = x;
+                result = reverse_bits(src1);
                 break;
             }
             default: {

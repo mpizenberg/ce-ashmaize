@@ -22,7 +22,7 @@ Now you can use the [`hash`] function to execute a random program against
 the [`Rom`] that will generate a Digest.
 
 ```
-use ashmaize::hash;
+use ashmaize::original::hash;
 # use ashmaize::{Rom, RomGenerationType};
 # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * 1_024);
 
@@ -39,4 +39,6 @@ pub use crate::rom::{Rom, RomGenerationType};
 pub mod original; // original implementation
 
 pub mod b2; // using the blake2 crate
-pub mod simd; // using the blake2b_simd crate
+#[cfg(target_os = "macos")]
+pub mod metal;
+pub mod simd; // using the blake2b_simd crate // GPU-accelerated implementation using Metal

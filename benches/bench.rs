@@ -17,7 +17,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     //                 pre_size: 16 * MB,
     //                 mixing_numbers: 4,
     //             },
-    //             1 * GB,
+    //             GB,
     //         )
     //     })
     // });
@@ -29,61 +29,81 @@ fn criterion_benchmark(c: &mut Criterion) {
             pre_size: 16 * MB,
             mixing_numbers: 4,
         },
-        1 * GB,
+        GB,
     );
 
-    // hash takes 720 us
-    c.bench_function("original::hash", |b| {
-        b.iter(|| ashmaize::original::hash(b"salt", &rom, 8, 256))
-    });
+    // // hash takes 720 us
+    // c.bench_function("original::hash", |b| {
+    //     b.iter(|| ashmaize::original::hash(b"salt", &rom, 8, 256))
+    // });
 
     // blake2 crate hash slightly faster than cryptoxide
     c.bench_function("b2::hash", |b| {
         b.iter(|| ashmaize::b2::hash(b"salt", &rom, 8, 256))
     });
 
-    // simd hash same speed as cryptoxide one
-    c.bench_function("simd::hash", |b| {
-        b.iter(|| ashmaize::simd::hash(b"salt", &rom, 8, 256))
-    });
+    // // simd hash same speed as cryptoxide one
+    // c.bench_function("simd::hash", |b| {
+    //     b.iter(|| ashmaize::simd::hash(b"salt", &rom, 8, 256))
+    // });
 
-    // VM::new takes 2 us
-    c.bench_function("VM::new", |b| {
-        b.iter(|| ashmaize::original::VM::new(&rom.digest, 256, b"salt"))
-    });
-
-    // VM::execute takes 100 us (and is executed 8 times) is CLEARLY the thing to optimize
-    // VM::finalize takes 1 us
-    let mut vm = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
-    c.bench_function("VM::execute", |b| b.iter(|| vm.execute(&rom, 256)));
-    c.bench_function("VM::finalize", |b| b.iter(|| vm.clone().finalize()));
-
-    // Look at inside the VM::execute function.
-    // It seems that all three of shuffle / step / post_instructions
-    // would be worth optimizing equally.
-    //
-    // program.shuffle takes 20 us
-    let mut vm1 = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
-    c.bench_function("program.shuffle", |b| {
-        b.iter(|| vm1.program.shuffle(&vm1.prog_seed))
-    });
-
-    // VM.step (x256) takes 27 us
-    let mut vm2 = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
-    vm2.program.shuffle(&vm2.prog_seed);
-    c.bench_function("VM.step (x256)", |b| {
+    // Benchmark the CPU version running 64 hashes sequentially
+    c.bench_function("b2::hash x64 (CPU)", |b| {
         b.iter(|| {
-            for _ in 0..256 {
-                vm2.step(&rom)
+            for i in 0..64 {
+                let salt = format!("salt{}", i).into_bytes();
+                ashmaize::b2::hash(&salt, &rom, 8, 256);
             }
         })
     });
 
-    // VM.post_instructions takes 35 us
-    let mut vm3 = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
-    c.bench_function("VM.post_instructions", |b| {
-        b.iter(|| vm3.post_instructions())
-    });
+    #[cfg(not(target_os = "macos"))]
+    {
+        c.bench_function("metal::hash x64 (GPU) - PLATFORM NOT SUPPORTED", |b| {
+            b.iter(|| {
+                // This is just a placeholder since Metal is not available on this platform
+                std::hint::black_box(());
+            })
+        });
+    }
+
+    // // VM::new takes 2 us
+    // c.bench_function("VM::new", |b| {
+    //     b.iter(|| ashmaize::original::VM::new(&rom.digest, 256, b"salt"))
+    // });
+
+    // // VM::execute takes 100 us (and is executed 8 times) is CLEARLY the thing to optimize
+    // // VM::finalize takes 1 us
+    // let mut vm = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
+    // c.bench_function("VM::execute", |b| b.iter(|| vm.execute(&rom, 256)));
+    // c.bench_function("VM::finalize", |b| b.iter(|| vm.clone().finalize()));
+
+    // // Look at inside the VM::execute function.
+    // // It seems that all three of shuffle / step / post_instructions
+    // // would be worth optimizing equally.
+    // //
+    // // program.shuffle takes 20 us
+    // let mut vm1 = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
+    // c.bench_function("program.shuffle", |b| {
+    //     b.iter(|| vm1.program.shuffle(&vm1.prog_seed))
+    // });
+
+    // // VM.step (x256) takes 27 us
+    // let mut vm2 = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
+    // vm2.program.shuffle(&vm2.prog_seed);
+    // c.bench_function("VM.step (x256)", |b| {
+    //     b.iter(|| {
+    //         for _ in 0..256 {
+    //             vm2.step(&rom)
+    //         }
+    //     })
+    // });
+
+    // // VM.post_instructions takes 35 us
+    // let mut vm3 = ashmaize::original::VM::new(&rom.digest, 256, b"salt");
+    // c.bench_function("VM.post_instructions", |b| {
+    //     b.iter(|| vm3.post_instructions())
+    // });
 
     // c.bench_function("RandomX/initialize", |b| {
     //     b.iter(|| {

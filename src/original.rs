@@ -22,7 +22,7 @@ Now you can use the [`hash`] function to execute a random program against
 the [`Rom`] that will generate a Digest.
 
 ```
-use ashmaize::hash;
+use ashmaize::original::hash;
 # use ashmaize::{Rom, RomGenerationType};
 # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * 1_024);
 
@@ -159,8 +159,8 @@ impl VM {
         }
 
         let mut digests = init_buffer_digests.chunks(DIGEST_INIT_SIZE);
-        let prog_digest = Blake2b::<512>::new().update(&digests.next().unwrap());
-        let mem_digest = Blake2b::<512>::new().update(&digests.next().unwrap());
+        let prog_digest = Blake2b::<512>::new().update(digests.next().unwrap());
+        let mem_digest = Blake2b::<512>::new().update(digests.next().unwrap());
         let prog_seed = *<&[u8; 64]>::try_from(digests.next().unwrap()).unwrap();
 
         assert_eq!(digests.next(), None);
@@ -435,7 +435,7 @@ fn execute_one_instruction(vm: &mut VM, rom: &Rom) {
 /// # Example
 ///
 /// ```
-/// # use ashmaize::{Rom, RomGenerationType, hash};
+/// # use ashmaize::{Rom, RomGenerationType, original::hash};
 /// # const KB: usize = 1_024;
 /// # let rom = Rom::new(b"seed", RomGenerationType::FullRandom, 16 * KB);
 /// const NB_LOOPS: u32 = 8;

@@ -341,29 +341,32 @@ class OrchestratorTUI(App):
     def run_fetcher_worker(self) -> None:
         """Runs the fetcher logic in a background thread."""
         fetcher_func = self.worker_functions["fetcher"]
-        fetcher_func(self.db_manager, self.stop_event, self)
+        headless = self.worker_args.get("headless", True)
+        fetcher_func(self.db_manager, self.stop_event, self, headless)
 
     @work(name="solver", group="workers", thread=True)
     def run_solver_worker(self) -> None:
         """Runs the solver logic in a background thread."""
         solver_func = self.worker_functions["solver"]
         solve_interval = self.worker_args["solve_interval"]
-        max_solvers = self.worker_args["max_solvers"]
+        cpu_threads = self.worker_args["cpu_threads"]
         challenge_selection = self.worker_args["challenge_selection"]
         solver_func(
             self.db_manager,
             self.stop_event,
             solve_interval,
             self,
-            max_solvers,
+            cpu_threads,
             challenge_selection,
+            self.worker_args["gpu"],
         )
 
     @work(name="submission", group="workers", thread=True)
     def run_submission_worker(self) -> None:
         """Runs the submission logic in a background thread."""
         submission_func = self.worker_functions["submission"]
-        submission_func(self.db_manager, self.stop_event, self)
+        no_auto_submit = self.worker_args.get("no_auto_submit", False)
+        submission_func(self.db_manager, self.stop_event, self, no_auto_submit)
 
     @work(name="saver", group="workers", thread=True)
     def run_saver_worker(self) -> None:

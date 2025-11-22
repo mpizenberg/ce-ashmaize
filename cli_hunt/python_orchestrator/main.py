@@ -2,13 +2,14 @@ import argparse
 import json
 import logging
 import os
+import random
+import time
 import concurrent.futures
 import subprocess
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone, timedelta
 
-from curl_cffi import requests
 from tui import (
     ChallengeUpdate,
     SolutionFound,
@@ -17,6 +18,7 @@ from tui import (
     RefreshTable,
     StatsUpdate,
 )
+from browser_session import get_browser_session, close_browser_session
 
 # --- Constants ---
 DB_FILE = "challenges.json"
@@ -26,19 +28,39 @@ RUST_SOLVER_PATH = (
     "../rust_solver/target/release/ashmaize-solver"  # Assuming it's built
 )
 FETCH_INTERVAL = 10 * 60  # 10 minutes
-DEFAULT_MAX_SOLVERS = 2  # Two solvers in parallel by default
 DEFAULT_SOLVE_INTERVAL = 2 * 60  # 2 minutes
 DEFAULT_SAVE_INTERVAL = 10 * 60  # 10 minutes
 DEFAULT_STATS_INTERVAL = 60 * 60  # 60 minutes
 
+# API URLs
+BASE_URL = "https://sm.midnight.gd/api"
+SESSION_INIT_URL = "https://sm.midnight.gd/"
 
-# --- HTTP Session Setup ---
-session = requests.Session()
 
-# --- HTTP Session Setup ---
-# Using curl_cffi to impersonate a browser's TLS fingerprint. This is more
-# effective at avoiding blocking than just setting User-Agent headers.
-session = requests.Session(impersonate="chrome110")
+# --- Browser Session Setup ---
+# Using Playwright with a real Chromium browser to bypass Kasada bot detection.
+# This executes JavaScript and provides authentic browser fingerprinting.
+browser = None
+
+
+def initialize_session(headless=True):
+    """Initialize Playwright browser session with cookies.
+
+    Args:
+        headless: Whether to run browser in headless mode. Non-headless is harder to detect.
+    """
+    global browser
+    try:
+        logging.info(f"Initializing browser session with {SESSION_INIT_URL}...")
+        logging.info(
+            f"Browser mode: {'headless' if headless else 'non-headless (visible)'}"
+        )
+        browser = get_browser_session(headless=headless)
+        browser.initialize(SESSION_INIT_URL)
+        logging.info("Browser session initialized successfully with cookies.")
+    except Exception as e:
+        logging.error(f"Failed to initialize browser session: {e}")
+        raise
 
 
 # --- Logging Setup ---
@@ -56,12 +78,126 @@ def setup_logging():
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+# --- Anti-Bot Detection Helpers ---
+def add_human_delay(min_delay=1.0, max_delay=3.0):
+    """Add a random delay to simulate human behavior and avoid bot detection.
+
+    Uses a more realistic delay pattern with occasional longer pauses.
+    """
+    delay = random.uniform(min_delay, max_delay)
+    # 15% chance of a longer pause to simulate reading/thinking
+    if random.random() < 0.15:
+        delay += random.uniform(2.0, 4.0)
+    time.sleep(delay)
+
+
+def check_kasada_challenge(response):
+    """
+    Check if the response contains Kasada bot detection challenge.
+    Returns True if a challenge is detected, False otherwise.
+
+    Args:
+        response: Browser response dict with 'headers' and 'body' keys
+    """
+    # Check for common Kasada indicators in headers
+    kasada_headers = ["x-kpsdk-cd", "x-kpsdk-ct", "x-kpsdk-r", "x-kpsdk-v"]
+    headers = response.get("headers", {})
+    for header in kasada_headers:
+        if header in headers:
+            logging.warning(f"Kasada challenge detected via header: {header}")
+            return True
+
+    # Check for Kasada in response body
+    body = response.get("body", "")
+    if body and (
+        "kpsdk" in body.lower() or "kasada" in body.lower() or "x-kpsdk" in body.lower()
+    ):
+        logging.warning("Kasada challenge detected in response body")
+        return True
+
+    return False
+
+
+class BrowserResponse:
+    """Wrapper to make browser response compatible with requests library interface."""
+
+    def __init__(self, browser_response):
+        self._response = browser_response
+        self.status_code = browser_response["status"]
+        self.ok = browser_response["ok"]
+        self.headers = browser_response["headers"]
+        self.text = browser_response["body"]
+        self._json = browser_response["json"]
+
+    def json(self):
+        """Return parsed JSON response."""
+        if self._json is not None:
+            return self._json
+        import json
+
+        return json.loads(self.text)
+
+    def raise_for_status(self):
+        """Raise an exception for HTTP error codes."""
+        if not self.ok:
+            raise Exception(f"HTTP {self.status_code}: {self.text[:200]}")
+
+
+def make_api_request(url, method="get", add_delay=True, **kwargs):
+    """
+    Make an API request using Playwright browser with human-like delays.
+
+    Args:
+        url: The URL to request
+        method: HTTP method ('get' or 'post')
+        add_delay: Whether to add a random delay before the request
+        **kwargs: Additional arguments (timeout, data, etc.)
+
+    Returns:
+        BrowserResponse object compatible with requests library
+
+    Raises:
+        Exception if Kasada challenge is detected or request fails
+    """
+    global browser
+
+    if browser is None:
+        raise RuntimeError(
+            "Browser session not initialized. Call initialize_session() first."
+        )
+
+    # Extract timeout from kwargs (convert seconds to milliseconds)
+    timeout = kwargs.pop("timeout", 30) * 1000
+
+    try:
+        if method.lower() == "get":
+            response = browser.get(url, timeout=int(timeout))
+        elif method.lower() == "post":
+            data = kwargs.pop("data", None)
+            response = browser.post(url, data=data, timeout=int(timeout))
+        else:
+            raise ValueError(f"Unsupported HTTP method: {method}")
+
+        # Check for Kasada challenge
+        if check_kasada_challenge(response):
+            raise Exception(
+                "Kasada bot detection challenge encountered. Request blocked."
+            )
+
+        # Wrap response to be compatible with requests library
+        return BrowserResponse(response)
+
+    except Exception as e:
+        logging.error(f"Browser request failed for {url}: {e}")
+        raise
+
+
 # --- Wallet Statistics Functions ---
 def fetch_wallet_statistics(address):
     """Fetch mining statistics for a wallet from the API."""
     try:
-        url = f"https://scavenger.prod.gd.midnighttge.io/statistics/{address}"
-        response = session.get(url, timeout=10)
+        url = f"{BASE_URL}/statistics/{address}"
+        response = make_api_request(url, method="get", timeout=10)
         response.raise_for_status()
         data = response.json()
 
@@ -246,8 +382,10 @@ class DatabaseManager:
 # They accept a `tui_app` object to post messages back to the UI thread.
 
 
-def fetcher_worker(db_manager, stop_event, tui_app):
+def fetcher_worker(db_manager, stop_event, tui_app, headless=True):
     tui_app.post_message(LogMessage("Fetcher thread started."))
+    # Re-initialize session to ensure fresh cookies
+    initialize_session(headless=headless)
     while not stop_event.is_set():
         tui_app.post_message(LogMessage("Fetching new challenges..."))
         addresses = db_manager.get_addresses()
@@ -257,9 +395,7 @@ def fetcher_worker(db_manager, stop_event, tui_app):
             )
         else:
             try:
-                response = session.get(
-                    "https://scavenger.prod.gd.midnighttge.io/challenge"
-                )
+                response = make_api_request(f"{BASE_URL}/challenge", method="get")
                 response.raise_for_status()
                 challenge_data = response.json()["challenge"]
 
@@ -290,18 +426,18 @@ def fetcher_worker(db_manager, stop_event, tui_app):
                     # Signal to the UI that a full refresh is needed to show the new column
                     tui_app.post_message(RefreshTable())
 
-            except requests.exceptions.RequestException as e:  # ty: ignore
+            except Exception as e:
                 tui_app.post_message(LogMessage(f"Error fetching challenge: {e}"))
-            except json.JSONDecodeError:
-                tui_app.post_message(
-                    LogMessage("Error decoding challenge API response.")
-                )
 
-        stop_event.wait(FETCH_INTERVAL)
+        # Add jitter to avoid predictable timing patterns
+        jittered_interval = FETCH_INTERVAL * random.uniform(0.8, 1.2)
+        stop_event.wait(jittered_interval)
     logging.info("Fetcher thread stopped.")
 
 
-def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
+def _solve_one_challenge(
+    db_manager, tui_app, stop_event, address, challenge, cpu_threads, gpu
+):
     """Solves a single challenge."""
     c = challenge  # for brevity
     short_address = f"{address[:10]}…{address[-6:]}"
@@ -324,6 +460,10 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
             "--no-pre-mine-hour",
             str(c["noPreMineHour"]),  # Convert to string for subprocess
         ]
+        if cpu_threads is not None:
+            command += ["--cpu-threads", str(cpu_threads)]
+        if gpu:
+            command += ["--gpu"]
         start_time = datetime.now(timezone.utc)
         process = subprocess.Popen(
             command,
@@ -376,9 +516,7 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
             ),
             "salt": nonce,
         }
-        updated_status = db_manager.update_challenge(
-            address, c["challengeId"], update
-        )
+        updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
                 ChallengeUpdate(address, c["challengeId"], updated_status)
@@ -401,16 +539,22 @@ def _solve_one_challenge(db_manager, tui_app, stop_event, address, challenge):
 
 
 def solver_worker(
-    db_manager, stop_event, solve_interval, tui_app, max_solvers, challenge_selection
+    db_manager,
+    stop_event,
+    solve_interval,
+    tui_app,
+    cpu_threads,
+    challenge_selection,
+    gpu,
 ):
     tui_app.post_message(
         LogMessage(
-            f"Solver thread started with {max_solvers} workers. Polling every {solve_interval / 60:.1f} minutes."
+            f"Solver thread started. Polling every {solve_interval / 60:.1f} minutes."
         )
     )
 
     # The executor should live for the duration of the worker
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_solvers) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         # Store futures for active tasks
         active_futures = set()
         while not stop_event.is_set():
@@ -420,7 +564,7 @@ def solver_worker(
             for f in done_futures:
                 active_futures.remove(f)
 
-            available_slots = max_solvers - len(active_futures)
+            available_slots = 1 - len(active_futures)
             challenges_dispatched_this_round = 0
             if available_slots > 0:
                 addresses = db_manager.get_addresses()
@@ -434,7 +578,7 @@ def solver_worker(
                             latest_submission = datetime.fromisoformat(
                                 c["latestSubmission"].replace("Z", "+00:00")
                             )
-                            if now > latest_submission - timedelta(hours=1):
+                            if now > latest_submission - timedelta(hours=2):
                                 # Expire challenge
                                 updated_status = db_manager.update_challenge(
                                     address, c["challengeId"], {"status": "expired"}
@@ -482,6 +626,8 @@ def solver_worker(
                                 stop_event,
                                 address,
                                 deepcopy(c),  # Pass a deepcopy
+                                cpu_threads,
+                                gpu,
                             )
                             active_futures.add(future)
                             challenges_dispatched_this_round += 1
@@ -498,7 +644,7 @@ def solver_worker(
                     tui_app.post_message(LogMessage("No available challenges found."))
 
             # If all slots are full, wait for one future to complete, or a short timeout
-            if len(active_futures) >= max_solvers and active_futures:
+            if len(active_futures) >= 1 and active_futures:
                 # Wait for at least one task to complete or a short period if none are done quickly
                 concurrent.futures.wait(
                     active_futures,
@@ -508,7 +654,9 @@ def solver_worker(
             else:
                 # If there are available slots (or no active tasks),
                 # wait the full solve_interval before checking for *new* challenges again.
-                stop_event.wait(solve_interval)
+                # Add jitter to avoid predictable timing patterns
+                jittered_interval = solve_interval * random.uniform(0.8, 1.2)
+                stop_event.wait(jittered_interval)
 
     logging.info("Solver thread stopped.")
 
@@ -521,9 +669,9 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
     tui_app.post_message(LogMessage(msg))
     update = {}
     api_okay = True
-    submit_url = f"https://scavenger.prod.gd.midnighttge.io/solution/{address}/{c['challengeId']}/{c['salt']}"
+    submit_url = f"{BASE_URL}/solution/{address}/{c['challengeId']}/{c['salt']}"
     try:
-        submit_response = session.post(submit_url)
+        submit_response = make_api_request(submit_url, method="post")
         submit_response.raise_for_status()
         submitted_time = datetime.now(timezone.utc)
         tui_app.post_message(
@@ -546,9 +694,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
                 "cryptoReceipt": crypto_receipt,
             }
             tui_app.post_message(
-                LogMessage(
-                    f"🎉 Successfully validated challenge {c['challengeId']}"
-                )
+                LogMessage(f"🎉 Successfully validated challenge {c['challengeId']}")
             )
         else:
             update = {
@@ -565,9 +711,7 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
         tui_app.post_message(
             LogMessage("-----------------------------------------------")
         )
-        updated_status = db_manager.update_challenge(
-            address, c["challengeId"], update
-        )
+        updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
                 ChallengeUpdate(address, c["challengeId"], updated_status)
@@ -576,44 +720,59 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
         msg = f"Failed to decode submission response for {c['challengeId']}."
         tui_app.post_message(LogMessage(msg))
         api_okay = False
-    except requests.exceptions.RequestException as e:  # ty: ignore
+    except Exception as e:
         msg = f"⚠️ Error submitting solution for {c['challengeId']}: {e}"
         tui_app.post_message(LogMessage(msg))
         update = {
             "status": "submitting",
         }
         api_okay = False
-        if e.response is not None:
-            status_code = e.response.status_code
-            message = ""
-            json_content = e.response.content.decode()
+
+        # Try to parse error response if it's an HTTP error
+        error_str = str(e)
+        if "HTTP" in error_str:
             try:
-                content = json.loads(json_content)
-                message = content['message']
-                tui_app.post_message(LogMessage(f"Message: {message}"))
-            except json.JSONDecodeError:
-                pass
-            if (status_code == 400 and
-                    message == "Solution validation failed: Solution already exists"):
-                update = {
-                    "status": "solved",  # Submitted but not validated with receipt
-                }
-                tui_app.post_message(
-                    LogMessage(
-                        f"Submission for {c['challengeId']} OK but already exists."
+                # Extract status code and response body from error message
+                if "HTTP " in error_str:
+                    parts = error_str.split("HTTP ", 1)[1]
+                    status_code = int(parts.split(":", 1)[0])
+                    response_text = (
+                        parts.split(":", 1)[1].strip() if ":" in parts else ""
                     )
-                )
-                api_okay = True
-            elif status_code == 429:
-                api_okay = False
-            elif 400 <= status_code < 500:
-                update = {
-                    "status": "submission_error",
-                }
-                api_okay = True
-        updated_status = db_manager.update_challenge(
-            address, c["challengeId"], update
-        )
+
+                    message = ""
+                    try:
+                        content = json.loads(response_text)
+                        message = content.get("message", "")
+                        if message:
+                            tui_app.post_message(LogMessage(f"Message: {message}"))
+                    except:
+                        pass
+
+                    if (
+                        status_code == 400
+                        and message
+                        == "Solution validation failed: Solution already exists"
+                    ):
+                        update = {
+                            "status": "solved",  # Submitted but not validated with receipt
+                        }
+                        tui_app.post_message(
+                            LogMessage(
+                                f"Submission for {c['challengeId']} OK but already exists."
+                            )
+                        )
+                        api_okay = True
+                    elif status_code == 429:
+                        api_okay = False
+                    elif 400 <= status_code < 500:
+                        update = {
+                            "status": "submission_error",
+                        }
+                        api_okay = True
+            except:
+                pass  # Couldn't parse error, keep api_okay = False
+        updated_status = db_manager.update_challenge(address, c["challengeId"], update)
         if updated_status:
             tui_app.post_message(
                 ChallengeUpdate(address, c["challengeId"], updated_status)
@@ -621,12 +780,18 @@ def _submit_one_challenge(db_manager, tui_app, address, challenge):
     return api_okay
 
 
-def submission_worker(db_manager, stop_event, tui_app):
-    tui_app.post_message(
-        LogMessage(
-            "Submission thread started."
+def submission_worker(db_manager, stop_event, tui_app, no_auto_submit=False):
+    if no_auto_submit:
+        tui_app.post_message(
+            LogMessage(
+                "Submission thread disabled (--no-auto-submit). Use 'export' command to submit via browser."
+            )
         )
-    )
+        # Just wait indefinitely until stop
+        stop_event.wait()
+        return
+
+    tui_app.post_message(LogMessage("Submission thread started."))
     backoff = 1
     while not stop_event.is_set():
         challenges_left = False
@@ -652,7 +817,9 @@ def submission_worker(db_manager, stop_event, tui_app):
             if stop_event.is_set():
                 break
         if not challenges_left:
-            stop_event.wait(10)
+            # Add jitter to avoid predictable timing patterns
+            jittered_interval = 10 * random.uniform(0.8, 1.2)
+            stop_event.wait(jittered_interval)
     logging.info("Submission thread stopped.")
 
 
@@ -663,7 +830,9 @@ def saver_worker(db_manager, stop_event, interval, tui_app):
         )
     )
     while not stop_event.is_set():
-        stop_event.wait(interval)
+        # Add jitter to avoid predictable timing patterns
+        jittered_interval = interval * random.uniform(0.8, 1.2)
+        stop_event.wait(jittered_interval)
         if stop_event.is_set():
             break
         tui_app.post_message(LogMessage("Performing periodic save..."))
@@ -679,17 +848,20 @@ def stats_worker(db_manager, stop_event, interval, tui_app):
         )
     )
     while not stop_event.is_set():
-        stop_event.wait(interval)
+        # Add jitter to avoid predictable timing patterns
+        jittered_interval = interval * random.uniform(0.8, 1.2)
+        stop_event.wait(jittered_interval)
         if stop_event.is_set():
             break
 
-        # Update wallet statistics from API
-        addresses = db_manager.get_addresses()
-        tui_app.post_message(LogMessage("Updating wallet statistics..."))
-        for address in addresses:
-            (crypto_receipts, night) = fetch_wallet_statistics(address)
-            if crypto_receipts is not None and night is not None:
-                db_manager.update_wallet_statistics(address, crypto_receipts, night)
+        # Avoid asking for statistics to avoid too many requests
+        # # Update wallet statistics from API
+        # addresses = db_manager.get_addresses()
+        # tui_app.post_message(LogMessage("Updating wallet statistics..."))
+        # for address in addresses:
+        #     (crypto_receipts, night) = fetch_wallet_statistics(address)
+        #     if crypto_receipts is not None and night is not None:
+        #         db_manager.update_wallet_statistics(address, crypto_receipts, night)
 
         # Get all stats and calculate total
         (all_receipts, all_night) = db_manager.get_all_wallet_statistics()
@@ -768,6 +940,11 @@ def init_db(json_files):
 def run_orchestrator(args):
     """Starts and manages the TUI and all worker threads."""
     logging.info("Starting orchestrator TUI...")
+
+    # Initialize session with cookies before starting workers
+    headless = not args.visible_browser if hasattr(args, "visible_browser") else True
+    initialize_session(headless=headless)
+
     db_manager = DatabaseManager()
 
     worker_functions = {
@@ -782,8 +959,11 @@ def run_orchestrator(args):
         "solve_interval": args.solve_interval,
         "save_interval": args.save_interval,
         "stats_interval": args.stats_interval,
-        "max_solvers": args.max_solvers,
+        "cpu_threads": args.cpu_threads,
         "challenge_selection": args.challenge_selection,
+        "gpu": args.gpu,
+        "headless": headless,
+        "no_auto_submit": args.no_auto_submit,
     }
 
     app = OrchestratorTUI(
@@ -791,8 +971,14 @@ def run_orchestrator(args):
         worker_functions=worker_functions,
         worker_args=worker_args,
     )
-    app.run()
-    logging.info("Orchestrator shut down.")
+
+    try:
+        app.run()
+    finally:
+        # Clean up browser session on shutdown
+        logging.info("Cleaning up browser session...")
+        close_browser_session()
+        logging.info("Orchestrator shut down.")
 
 
 def main():
@@ -808,17 +994,11 @@ def main():
 
     run_parser = subparsers.add_parser("run", help="Run the orchestrator with TUI.")
     run_parser.add_argument(
-        "--max-solvers",
-        type=int,
-        default=DEFAULT_MAX_SOLVERS,  # A sensible default
-        help=f"Maximum number of concurrent solver processes to run (default: {DEFAULT_MAX_SOLVERS}).",
-    )
-    run_parser.add_argument(
         "--challenge-selection",
         type=str,
         choices=["first", "last"],
-        default="first",
-        help="Strategy for selecting the next challenge to solve (default: first, other option: last)",
+        default="last",
+        help="Strategy for selecting the next challenge to solve (default: last, other option: first)",
     )
     run_parser.add_argument(
         "--solve-interval",
@@ -837,6 +1017,26 @@ def main():
         type=int,
         default=DEFAULT_STATS_INTERVAL,
         help=f"Interval in seconds for updating wallet mining statistics (default: {DEFAULT_STATS_INTERVAL}).",
+    )
+    run_parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        help="Maximum number of cpu threads to run (default to 80%).",
+    )
+    run_parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Enable GPU mining (macOS only).",
+    )
+    run_parser.add_argument(
+        "--visible-browser",
+        action="store_true",
+        help="Run browser in visible mode (non-headless). This is harder to detect but requires a display.",
+    )
+    run_parser.add_argument(
+        "--no-auto-submit",
+        action="store_true",
+        help="Disable automatic submission. Solutions will be marked as 'submitting' and can be exported for manual browser submission.",
     )
 
     args = parser.parse_args()

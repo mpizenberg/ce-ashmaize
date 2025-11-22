@@ -1,7 +1,7 @@
 #[cfg(test)]
-mod tests {
+mod basic_tests {
     use crate::{hash_structure_good, init_rom}; // Import hash_structure_good, init_rom and constants
-    use ashmaize::hash;
+    use ashmaize::original::hash;
 
     #[test]
     fn validate_example_solution() {
@@ -30,7 +30,7 @@ mod tests {
         );
 
         // Hash the preimage
-        let hash_result = hash(&preimage.as_bytes(), &rom, 8, 256);
+        let hash_result = hash(preimage.as_bytes(), &rom, 8, 256);
         println!("DEBUG: Hash result: {:?}", hash_result);
 
         // Parse difficulty from hex string to u32 mask

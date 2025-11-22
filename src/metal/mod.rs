@@ -6,6 +6,8 @@ use metal::{CommandQueue, ComputePipelineState, Device, MTLSize};
 use std::ffi::c_void;
 use std::ptr;
 
+const SHOW_INSTRUMENT: bool = false;
+
 pub struct MetalAshmaize {
     device: Device,
     command_queue: CommandQueue,
@@ -468,28 +470,30 @@ impl MetalAshmaize {
             data
         };
 
-        eprintln!("\n--- GPU Instrumentation Metrics ---");
-        eprintln!(
-            "Blake2b Round Count: {}",
-            instrumentation_data[Self::METRIC_BLAKE2B_ROUND_COUNT]
-        );
-        eprintln!(
-            "Execute Instruction Count: {}",
-            instrumentation_data[Self::METRIC_EXECUTE_INSTR_COUNT]
-        );
-        eprintln!(
-            "Hprime Count: {}",
-            instrumentation_data[Self::METRIC_HPRIME_COUNT]
-        );
-        eprintln!(
-            "ROM Access Count: {}",
-            instrumentation_data[Self::METRIC_ROM_ACCESS_COUNT]
-        );
-        eprintln!(
-            "Special Value Count: {}",
-            instrumentation_data[Self::METRIC_SPECIAL_VALUE_COUNT]
-        );
-        eprintln!("-----------------------------------");
+        if SHOW_INSTRUMENT {
+            eprintln!("\n--- GPU Instrumentation Metrics ---");
+            eprintln!(
+                "Blake2b Round Count: {}",
+                instrumentation_data[Self::METRIC_BLAKE2B_ROUND_COUNT]
+            );
+            eprintln!(
+                "Execute Instruction Count: {}",
+                instrumentation_data[Self::METRIC_EXECUTE_INSTR_COUNT]
+            );
+            eprintln!(
+                "Hprime Count: {}",
+                instrumentation_data[Self::METRIC_HPRIME_COUNT]
+            );
+            eprintln!(
+                "ROM Access Count: {}",
+                instrumentation_data[Self::METRIC_ROM_ACCESS_COUNT]
+            );
+            eprintln!(
+                "Special Value Count: {}",
+                instrumentation_data[Self::METRIC_SPECIAL_VALUE_COUNT]
+            );
+            eprintln!("-----------------------------------");
+        }
 
         Ok(results)
     }
